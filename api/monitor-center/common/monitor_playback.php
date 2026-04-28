@@ -1,0 +1,486 @@
+<?php
+
+function sanitize_cover_text($name)
+{
+    $text = strtoupper(trim((string) $name));
+    if ($text === '') {
+        return 'VIDEO';
+    }
+    $text = preg_replace('/[^A-Z0-9]+/', '-', $text);
+    if ($text === null) $text = 'VIDEO';
+    $text = trim($text, '-');
+    if ($text === '') {
+        return 'VIDEO';
+    }
+    return substr($text, 0, 32);
+}
+
+function url_encode_path_segments($path)
+{
+    $segments = array();
+    foreach (explode('/', str_replace('\\', '/', (string) $path)) as $segment) {
+        if ($segment === '') continue;
+        $segments[] = rawurlencode($segment);
+    }
+    return implode('/', $segments);
+}
+
+function parse_env_path_list($raw)
+{
+    $items = array();
+    $text = trim((string) $raw);
+    if ($text === '') return $items;
+    $parts = preg_split('/[;\n\r]+/', $text);
+    foreach ((array) $parts as $part) {
+        $value = trim((string) $part);
+        if ($value === '') continue;
+        $items[] = $value;
+    }
+    return $items;
+}
+
+function guess_desktop_video_dirs()
+{
+    $dirs = array();
+    $userProfile = isset($_SERVER['USERPROFILE']) ? trim((string) $_SERVER['USERPROFILE']) : '';
+    if ($userProfile === '' && isset($_ENV['USERPROFILE'])) {
+        $userProfile = trim((string) $_ENV['USERPROFILE']);
+    }
+    if ($userProfile !== '') {
+        $dirs[] = $userProfile . DIRECTORY_SEPARATOR . 'Desktop' . DIRECTORY_SEPARATOR . 'video';
+        $dirs[] = $userProfile . DIRECTORY_SEPARATOR . 'Desktop' . DIRECTORY_SEPARATOR . 'videos';
+        $dirs[] = $userProfile . DIRECTORY_SEPARATOR . 'OneDrive' . DIRECTORY_SEPARATOR . 'Desktop' . DIRECTORY_SEPARATOR . 'video';
+        $dirs[] = $userProfile . DIRECTORY_SEPARATOR . 'OneDrive' . DIRECTORY_SEPARATOR . 'Desktop' . DIRECTORY_SEPARATOR . 'videos';
+    }
+    return $dirs;
+}
+
+function build_playback_scan_roots()
+{
+    $projectRoot = dirname(__DIR__, 3);
+    $docRoot = isset($_SERVER['DOCUMENT_ROOT']) ? rtrim((string) $_SERVER['DOCUMENT_ROOT'], '/\\') : '';
+    $roots = array();
+
+    $envRoots = parse_env_path_list(getenv('PLAYBACK_VIDEO_ROOTS'));
+    foreach ($envRoots as $rootPath) {
+        $roots[] = array('dir' => $rootPath, 'urlPrefix' => 'videos');
+    }
+
+    $defaultDirs = array(
+        $docRoot === '' ? '' : ($docRoot . DIRECTORY_SEPARATOR . 'videos'),
+        $projectRoot . DIRECTORY_SEPARATOR . 'videos',
+        $projectRoot . DIRECTORY_SEPARATOR . 'file' . DIRECTORY_SEPARATOR . 'videos'
+    );
+    foreach (guess_desktop_video_dirs() as $desktopDir) {
+        $defaultDirs[] = $desktopDir;
+    }
+
+    foreach ($defaultDirs as $dir) {
+        $roots[] = array('dir' => $dir, 'urlPrefix' => 'videos');
+    }
+
+    return $roots;
+}
+
+function normalize_http_base_url($url)
+{
+    $base = trim((string) $url);
+    if ($base === '') {
+        return '';
+    }
+    if (!preg_match('/^https?:\/\//i', $base)) {
+        return '';
+    }
+    return rtrim($base, '/') . '/';
+}
+
+function fetch_http_text($url, $timeoutSeconds = 5)
+{
+    $target = trim((string) $url);
+    if ($target === '') {
+        return null;
+    }
+
+    $timeout = intval($timeoutSeconds);
+    if ($timeout <= 0) {
+        $timeout = 5;
+    }
+
+    $context = stream_context_create(array(
+        'http' => array(
+            'method' => 'GET',
+            'timeout' => $timeout,
+            'ignore_errors' => true,
+            'header' => "Connection: close\r\nUser-Agent: charging-platform/1.0\r\n"
+        )
+    ));
+
+    $content = @file_get_contents($target, false, $context);
+    if (is_string($content) && $content !== '') {
+        return $content;
+    }
+
+    if (function_exists('curl_init')) {
+        $ch = curl_init($target);
+        if ($ch !== false) {
+            curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+            curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true);
+            curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, $timeout);
+            curl_setopt($ch, CURLOPT_TIMEOUT, $timeout);
+            curl_setopt($ch, CURLOPT_HTTPHEADER, array('Connection: close', 'User-Agent: charging-platform/1.0'));
+            $fallback = curl_exec($ch);
+            curl_close($ch);
+            if (is_string($fallback) && $fallback !== '') {
+                return $fallback;
+            }
+        }
+    }
+
+    return null;
+}
+
+function resolve_http_url($baseUrl, $href)
+{
+    $base = normalize_http_base_url($baseUrl);
+    $link = trim((string) $href);
+    if ($base === '' || $link === '') {
+        return '';
+    }
+
+    $hashPos = strpos($link, '#');
+    if ($hashPos !== false) {
+        $link = substr($link, 0, $hashPos);
+    }
+    $queryPos = strpos($link, '?');
+    if ($queryPos !== false) {
+        $link = substr($link, 0, $queryPos);
+    }
+    if ($link === '') {
+        return '';
+    }
+
+    if (preg_match('/^https?:\/\//i', $link)) {
+        return $link;
+    }
+    if (strpos($link, '//') === 0) {
+        $scheme = parse_url($base, PHP_URL_SCHEME);
+        if (!is_string($scheme) || $scheme === '') {
+            $scheme = 'http';
+        }
+        return $scheme . ':' . $link;
+    }
+
+    $baseParts = parse_url($base);
+    if ($baseParts === false) {
+        return '';
+    }
+    $scheme = isset($baseParts['scheme']) ? $baseParts['scheme'] : 'http';
+    $host = isset($baseParts['host']) ? $baseParts['host'] : '';
+    $port = isset($baseParts['port']) ? ':' . intval($baseParts['port']) : '';
+    if ($host === '') {
+        return '';
+    }
+    $origin = $scheme . '://' . $host . $port;
+
+    if (strpos($link, '/') === 0) {
+        return $origin . $link;
+    }
+
+    return $base . $link;
+}
+
+function try_parse_http_index_row_meta($rawTail)
+{
+    $meta = array(
+        'recordTimeMs' => null,
+        'fileSize' => null
+    );
+
+    $tail = html_entity_decode((string) $rawTail, ENT_QUOTES | ENT_HTML5, 'UTF-8');
+    $tail = trim(preg_replace('/\s+/', ' ', strip_tags($tail)));
+    if ($tail === '') {
+        return $meta;
+    }
+
+    $timeCandidates = array();
+    if (preg_match('/(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}(?::\d{2})?)/', $tail, $m)) {
+        $timeCandidates[] = $m[1];
+    }
+    if (preg_match('/(\d{2}-[A-Za-z]{3}-\d{4}\s+\d{2}:\d{2}(?::\d{2})?)/', $tail, $m)) {
+        $timeCandidates[] = $m[1];
+    }
+    if (preg_match('/(\d{4}\/\d{2}\/\d{2}\s+\d{2}:\d{2}(?::\d{2})?)/', $tail, $m)) {
+        $timeCandidates[] = $m[1];
+    }
+    foreach ($timeCandidates as $candidate) {
+        $ts = strtotime($candidate);
+        if ($ts !== false && $ts > 0) {
+            $meta['recordTimeMs'] = intval($ts) * 1000;
+            break;
+        }
+    }
+
+    if (preg_match('/\b(\d+(?:\.\d+)?)\s*([KMGT]?)(?:i?B)?\s*$/i', $tail, $m)) {
+        $num = floatval($m[1]);
+        $unit = strtoupper((string) $m[2]);
+        $factor = 1;
+        if ($unit === 'K') $factor = 1024;
+        if ($unit === 'M') $factor = 1024 * 1024;
+        if ($unit === 'G') $factor = 1024 * 1024 * 1024;
+        if ($unit === 'T') $factor = 1024 * 1024 * 1024 * 1024;
+        $meta['fileSize'] = intval(round($num * $factor));
+        return $meta;
+    }
+
+    if (preg_match('/\s(\d{2,})\s*$/', $tail, $m)) {
+        $meta['fileSize'] = intval($m[1]);
+    }
+
+    return $meta;
+}
+
+function parse_http_index_entries($html)
+{
+    $entries = array();
+    if (!is_string($html) || trim($html) === '') {
+        return $entries;
+    }
+
+    if (!preg_match_all('/<a\s+[^>]*href=["\']([^"\']+)["\'][^>]*>(.*?)<\/a>([^<\r\n]*)/is', $html, $matches, PREG_SET_ORDER)) {
+        return $entries;
+    }
+
+    foreach ($matches as $row) {
+        $hrefRaw = isset($row[1]) ? html_entity_decode((string) $row[1], ENT_QUOTES | ENT_HTML5, 'UTF-8') : '';
+        $nameRaw = isset($row[2]) ? html_entity_decode((string) $row[2], ENT_QUOTES | ENT_HTML5, 'UTF-8') : '';
+        $tail = isset($row[3]) ? (string) $row[3] : '';
+
+        $href = trim($hrefRaw);
+        if ($href === '' || $href === './' || $href === '../') {
+            continue;
+        }
+        if (stripos($href, 'javascript:') === 0 || stripos($href, 'mailto:') === 0) {
+            continue;
+        }
+
+        $isDir = substr($href, -1) === '/';
+        $name = trim(strip_tags($nameRaw));
+        if ($name === '') {
+            $name = trim($href, '/');
+        }
+
+        $meta = try_parse_http_index_row_meta($tail);
+        $entries[] = array(
+            'href' => $href,
+            'name' => $name,
+            'isDir' => $isDir,
+            'recordTimeMs' => $meta['recordTimeMs'],
+            'fileSize' => $meta['fileSize']
+        );
+    }
+
+    return $entries;
+}
+
+function build_record_time_from_name($filename)
+{
+    $name = (string) $filename;
+    if (preg_match('/(^|[^0-9])(1[0-9]{9})([^0-9]|$)/', $name, $m)) {
+        $ts = intval($m[2]);
+        if ($ts > 0) return $ts * 1000;
+    }
+    if (preg_match('/(^|[^0-9])(1[0-9]{12})([^0-9]|$)/', $name, $m)) {
+        $tsMs = intval($m[2]);
+        if ($tsMs > 0) return $tsMs;
+    }
+    return null;
+}
+
+function add_playback_http_records_recursive($rootBase, $currentUrl, $relativeDir, &$records, &$seenKeys, &$visitedDirs, $depth = 0)
+{
+    if ($depth > 10) {
+        return;
+    }
+
+    $current = normalize_http_base_url($currentUrl);
+    $root = normalize_http_base_url($rootBase);
+    if ($current === '' || $root === '') {
+        return;
+    }
+    if (strpos($current, $root) !== 0) {
+        return;
+    }
+    if (isset($visitedDirs[$current])) {
+        return;
+    }
+    $visitedDirs[$current] = true;
+
+    $html = fetch_http_text($current, 6);
+    if (!is_string($html) || trim($html) === '') {
+        return;
+    }
+
+    $entries = parse_http_index_entries($html);
+    foreach ($entries as $entry) {
+        $resolved = resolve_http_url($current, isset($entry['href']) ? $entry['href'] : '');
+        if ($resolved === '' || strpos($resolved, $root) !== 0) {
+            continue;
+        }
+
+        $resolvedNoQuery = preg_replace('/[?#].*$/', '', $resolved);
+        $relative = ltrim(substr($resolvedNoQuery, strlen($root)), '/');
+        if ($relative === '') {
+            continue;
+        }
+
+        $isDir = !empty($entry['isDir']);
+        if ($isDir) {
+            add_playback_http_records_recursive($root, $resolved, $relative, $records, $seenKeys, $visitedDirs, $depth + 1);
+            continue;
+        }
+
+        $ext = strtolower(pathinfo($relative, PATHINFO_EXTENSION));
+        if (!in_array($ext, array('mp4', 'mov', 'm4v', 'webm', 'm3u8'), true)) {
+            continue;
+        }
+
+        $relativeKey = strtolower($relative);
+        if (isset($seenKeys[$relativeKey])) {
+            continue;
+        }
+        $seenKeys[$relativeKey] = true;
+
+        $filename = pathinfo($relative, PATHINFO_FILENAME);
+        $recordTimeMs = isset($entry['recordTimeMs']) ? intval($entry['recordTimeMs']) : 0;
+        if ($recordTimeMs <= 0) {
+            $recordTimeMs = intval(build_record_time_from_name($filename));
+        }
+        if ($recordTimeMs <= 0) {
+            $recordTimeMs = intval(time()) * 1000;
+        }
+
+        $records[] = array(
+            'id' => abs(crc32($relative)) ?: (count($records) + 1),
+            'name' => str_replace('_', ' ', $filename),
+            'recordTime' => date('Y-m-d H:i:s', intval($recordTimeMs / 1000)),
+            'recordTimeMs' => $recordTimeMs,
+            'coverText' => sanitize_cover_text($filename),
+            'videoUrl' => $resolvedNoQuery,
+            'videoPath' => str_replace('\\', '/', $relative),
+            'fileSize' => isset($entry['fileSize']) ? intval($entry['fileSize']) : 0
+        );
+    }
+}
+
+function collect_playback_video_records()
+{
+    $httpBase = trim((string) getenv('PLAYBACK_VIDEO_HTTP_BASE'));
+    if ($httpBase === '') {
+        $httpBase = 'http://' . STREAM_SERVER_IP . '/videos/';
+    }
+    $httpBase = rtrim($httpBase, '/') . '/';
+    $candidateRoots = build_playback_scan_roots();
+
+    $records = array();
+    $seenKeys = array();
+    foreach ($candidateRoots as $rootItem) {
+        $dir = isset($rootItem['dir']) ? (string) $rootItem['dir'] : '';
+        if ($dir === '' || !is_dir($dir)) {
+            continue;
+        }
+
+        $base = rtrim(str_replace('\\', '/', $dir), '/');
+        $iterator = new RecursiveIteratorIterator(
+            new RecursiveDirectoryIterator($dir, FilesystemIterator::SKIP_DOTS)
+        );
+        foreach ($iterator as $fileInfo) {
+            if (!($fileInfo instanceof SplFileInfo) || !$fileInfo->isFile()) {
+                continue;
+            }
+
+            $ext = strtolower((string) $fileInfo->getExtension());
+            if (!in_array($ext, array('mp4', 'mov', 'm4v', 'webm', 'm3u8'), true)) {
+                continue;
+            }
+
+            $fullPath = str_replace('\\', '/', $fileInfo->getPathname());
+            if (strpos($fullPath, $base . '/') !== 0) {
+                continue;
+            }
+
+            $relative = ltrim(substr($fullPath, strlen($base)), '/');
+            if ($relative === '') continue;
+            $relativeKey = strtolower($relative);
+            if (isset($seenKeys[$relativeKey])) {
+                continue;
+            }
+            $seenKeys[$relativeKey] = true;
+
+            $filename = pathinfo($relative, PATHINFO_FILENAME);
+            $timestampSec = intval($fileInfo->getMTime());
+            $records[] = array(
+                'id' => abs(crc32($relative)) ?: (count($records) + 1),
+                'name' => str_replace('_', ' ', $filename),
+                'recordTime' => date('Y-m-d H:i:s', $timestampSec > 0 ? $timestampSec : time()),
+                'recordTimeMs' => ($timestampSec > 0 ? $timestampSec : time()) * 1000,
+                'coverText' => sanitize_cover_text($filename),
+                'videoUrl' => $httpBase . url_encode_path_segments($relative),
+                'videoPath' => str_replace('\\', '/', $relative),
+                'fileSize' => intval($fileInfo->getSize())
+            );
+        }
+    }
+
+    $visitedDirs = array();
+    add_playback_http_records_recursive($httpBase, $httpBase, '', $records, $seenKeys, $visitedDirs, 0);
+
+    usort($records, function ($a, $b) {
+        return intval($b['recordTimeMs']) - intval($a['recordTimeMs']);
+    });
+    return $records;
+}
+
+function handle_playback_list(PDO $pdo)
+{
+    if (strtoupper($_SERVER['REQUEST_METHOD']) !== 'GET') {
+        response_error('Method not allowed', 405);
+    }
+
+    $page = normalize_int_or_null(isset($_GET['page']) ? $_GET['page'] : 1);
+    $pageSize = normalize_int_or_null(isset($_GET['pageSize']) ? $_GET['pageSize'] : 20);
+    if ($page === null || $page <= 0) $page = 1;
+    if ($pageSize === null || $pageSize <= 0) $pageSize = 20;
+    if ($pageSize > 200) $pageSize = 200;
+
+    $keyword = strtolower(normalize_string(isset($_GET['videoName']) ? $_GET['videoName'] : ''));
+    $startTimeMs = normalize_datetime_to_timestamp_ms(isset($_GET['startTime']) ? $_GET['startTime'] : null);
+    $endTimeMs = normalize_datetime_to_timestamp_ms(isset($_GET['endTime']) ? $_GET['endTime'] : null);
+
+    $all = collect_playback_video_records();
+    $filtered = array();
+    foreach ($all as $item) {
+        $name = strtolower(isset($item['name']) ? (string) $item['name'] : '');
+        $recordTimeMs = intval(isset($item['recordTimeMs']) ? $item['recordTimeMs'] : 0);
+        if ($keyword !== '' && strpos($name, $keyword) === false) {
+            continue;
+        }
+        if ($startTimeMs !== null && $recordTimeMs > 0 && $recordTimeMs < $startTimeMs) {
+            continue;
+        }
+        if ($endTimeMs !== null && $recordTimeMs > 0 && $recordTimeMs > $endTimeMs) {
+            continue;
+        }
+        unset($item['recordTimeMs']);
+        $filtered[] = $item;
+    }
+
+    $total = count($filtered);
+    $offset = ($page - 1) * $pageSize;
+    $records = array_slice($filtered, $offset, $pageSize);
+
+    response_success(array(
+        'total' => $total,
+        'records' => array_values($records)
+    ));
+}
+
