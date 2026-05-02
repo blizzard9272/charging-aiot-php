@@ -112,9 +112,7 @@ class MediaMtxClient
 
                 if ($this->isPathAlreadyExistsError($syncResult)) {
                     $replaceResult = $this->replacePathConfig($name, $body, $mismatches);
-                    if (!empty($replaceResult['success'])) {
-                        return $replaceResult;
-                    }
+                    return $replaceResult;
                 }
 
                 return [
