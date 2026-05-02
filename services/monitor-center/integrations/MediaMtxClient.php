@@ -391,43 +391,29 @@ class MediaMtxClient
 
     private function replacePathConfig(string $pathName, array $body, array $mismatches): array
     {
-        $removeResult = $this->pathConfigClient->deletePathConfig($pathName);
-        if (!is_array($removeResult) || empty($removeResult['success'])) {
+        $replaceResult = $this->pathConfigClient->replacePathConfig($pathName, $body);
+        if (!is_array($replaceResult) || empty($replaceResult['success'])) {
             return [
                 'success' => false,
-                'code' => intval($removeResult['code'] ?? 500),
+                'code' => intval($replaceResult['code'] ?? 500),
                 'data' => [
                     'message' => 'failed to replace existing MediaMTX path config',
-                    'step' => 'remove',
+                    'step' => 'replace',
                     'mismatches' => $mismatches,
-                    'error' => is_array($removeResult) ? ($removeResult['data'] ?? 'unknown error') : 'unknown error'
-                ]
-            ];
-        }
-
-        $addResult = $this->pathConfigClient->addPathConfig($pathName, $body);
-        if (!is_array($addResult) || empty($addResult['success'])) {
-            return [
-                'success' => false,
-                'code' => intval($addResult['code'] ?? 500),
-                'data' => [
-                    'message' => 'failed to recreate MediaMTX path config after removing old config',
-                    'step' => 'add',
-                    'mismatches' => $mismatches,
-                    'error' => is_array($addResult) ? ($addResult['data'] ?? 'unknown error') : 'unknown error'
+                    'error' => is_array($replaceResult) ? ($replaceResult['data'] ?? 'unknown error') : 'unknown error'
                 ]
             ];
         }
 
         return [
             'success' => true,
-            'code' => intval($addResult['code'] ?? 200),
+            'code' => intval($replaceResult['code'] ?? 200),
             'data' => [
                 'exists' => true,
                 'updated' => true,
                 'replaced' => true,
                 'mismatches' => $mismatches,
-                'config' => $addResult['data']
+                'config' => $replaceResult['data']
             ]
         ];
     }

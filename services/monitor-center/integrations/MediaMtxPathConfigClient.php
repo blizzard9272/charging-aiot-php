@@ -86,6 +86,41 @@ class MediaMtxPathConfigClient
         return $result;
     }
 
+    public function replacePathConfig(string $pathName, array $config): array
+    {
+        $name = trim($pathName);
+        if ($name === '') {
+            return [
+                'success' => false,
+                'code' => 400,
+                'data' => 'pathName is required'
+            ];
+        }
+
+        $candidates = [
+            ['POST', $this->buildReplaceUrl($name)],
+            ['PUT', $this->buildReplaceUrl($name)],
+            ['PATCH', $this->buildPatchUrl($name)]
+        ];
+
+        $last = [
+            'success' => false,
+            'code' => 500,
+            'data' => 'failed to replace MediaMTX path config'
+        ];
+
+        foreach ($candidates as $candidate) {
+            [$method, $url] = $candidate;
+            $result = $this->request($method, $url, $config);
+            $last = $result;
+            if (!empty($result['success'])) {
+                return $result;
+            }
+        }
+
+        return $last;
+    }
+
     public function listPathConfigs(): array
     {
         $result = $this->request('GET', $this->baseUrl . '/list');
@@ -160,6 +195,16 @@ class MediaMtxPathConfigClient
     private function buildRemoveUrl(string $pathName): string
     {
         return $this->baseUrl . '/remove/' . rawurlencode($pathName);
+    }
+
+    private function buildReplaceUrl(string $pathName): string
+    {
+        return $this->baseUrl . '/replace/' . rawurlencode($pathName);
+    }
+
+    private function buildPatchUrl(string $pathName): string
+    {
+        return $this->baseUrl . '/patch/' . rawurlencode($pathName);
     }
 
     private function buildDeleteUrl(string $pathName): string

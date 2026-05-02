@@ -47,6 +47,9 @@ class DeviceService
         if ($recordPartDuration <= 0) {
             $recordPartDuration = 60;
         }
+        if ($recordEnabled && $recordPath === '') {
+            $recordPath = '/home/zjl/Desktop/videos/%path/%path_%Y%m%d_%H%M%S';
+        }
 
         $pathExistsStmt = $this->pdo->prepare('SELECT path_id FROM sys_camera_path WHERE path_name = ? LIMIT 1');
         $pathExistsStmt->execute([$pathName]);

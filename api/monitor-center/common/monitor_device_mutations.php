@@ -33,6 +33,31 @@ function build_hikvision_source_url($ipAddress, $username, $password, $streamTyp
     );
 }
 
+function normalize_record_path_template($pathName, $recordPath, $recordEnabled)
+{
+    $enabled = normalize_int_or_null($recordEnabled);
+    if ($enabled !== 1) {
+        return normalize_string($recordPath);
+    }
+
+    $path = normalize_string($pathName);
+    $current = normalize_string($recordPath);
+    if ($path === '') {
+        return $current;
+    }
+
+    $defaultTemplate = '/home/zjl/Desktop/videos/%path/%path_%Y%m%d_%H%M%S';
+    if ($current === '') {
+        return $defaultTemplate;
+    }
+
+    if (preg_match('#/home/zjl/Desktop/videos/%path/Cam\d+_%Y%m%d_%H%M%S$#i', $current)) {
+        return $defaultTemplate;
+    }
+
+    return $current;
+}
+
 function handle_update_device(PDO $pdo)
 {
     if (strtoupper($_SERVER['REQUEST_METHOD']) !== 'PUT') {
@@ -164,6 +189,7 @@ function handle_update_device(PDO $pdo)
             if ($recordEnabled === null) {
                 $recordEnabled = 0;
             }
+            $recordPath = normalize_record_path_template($pathName, $recordPath, $recordEnabled);
             if ($recordFormat === '') {
                 $recordFormat = 'fmp4';
             }
@@ -384,6 +410,7 @@ function handle_create_device(PDO $pdo)
     }
 
     $deviceService = new DeviceService($pdo, MediaMtxClient::getInstance());
+    $recordPath = normalize_record_path_template($pathName, $recordPath, $recordEnabled);
 
     try {
         $result = $deviceService->addCameraDevice([
