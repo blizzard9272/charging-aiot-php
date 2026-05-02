@@ -71,6 +71,7 @@ class MediaMtxClient
                 $body['recordFormat'] = $recordFormat;
             }
             $body['recordPartDuration'] = $recordPartDuration . 's';
+            $body['recordSegmentDuration'] = $recordPartDuration . 's';
         }
 
         $getResult = $this->pathConfigClient->getPathConfig($name);
@@ -92,7 +93,8 @@ class MediaMtxClient
                 'record' => $recordEnabled,
                 'recordPath' => $recordPath,
                 'recordFormat' => $recordFormat,
-                'recordPartDuration' => $recordPartDuration
+                'recordPartDuration' => $recordPartDuration,
+                'recordSegmentDuration' => $recordPartDuration
             ]);
 
             if (!empty($mismatches)) {
@@ -306,6 +308,17 @@ class MediaMtxClient
                         'field' => 'recordPartDuration',
                         'expected' => intval($expected['recordPartDuration']),
                         'actual' => $current['recordPartDuration']
+                    ];
+                }
+            }
+
+            if (array_key_exists('recordSegmentDuration', $current)) {
+                $currentSegmentDuration = $this->toDurationSeconds($current['recordSegmentDuration']);
+                if ($currentSegmentDuration !== null && intval($expected['recordSegmentDuration'] ?? 0) > 0 && $currentSegmentDuration !== intval($expected['recordSegmentDuration'])) {
+                    $mismatches[] = [
+                        'field' => 'recordSegmentDuration',
+                        'expected' => intval($expected['recordSegmentDuration']),
+                        'actual' => $current['recordSegmentDuration']
                     ];
                 }
             }
