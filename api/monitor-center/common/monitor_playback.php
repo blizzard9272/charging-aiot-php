@@ -39,6 +39,29 @@ function parse_env_path_list($raw)
     return $items;
 }
 
+function read_runtime_setting($name)
+{
+    $key = trim((string) $name);
+    if ($key === '') {
+        return '';
+    }
+
+    if (isset($_SERVER[$key]) && trim((string) $_SERVER[$key]) !== '') {
+        return trim((string) $_SERVER[$key]);
+    }
+
+    if (isset($_ENV[$key]) && trim((string) $_ENV[$key]) !== '') {
+        return trim((string) $_ENV[$key]);
+    }
+
+    $value = getenv($key);
+    if (is_string($value) && trim($value) !== '') {
+        return trim($value);
+    }
+
+    return '';
+}
+
 function guess_desktop_video_dirs()
 {
     $dirs = array();
@@ -72,7 +95,7 @@ function build_playback_scan_roots()
     $docRoot = isset($_SERVER['DOCUMENT_ROOT']) ? rtrim((string) $_SERVER['DOCUMENT_ROOT'], '/\\') : '';
     $roots = array();
 
-    $envRoots = parse_env_path_list(getenv('PLAYBACK_VIDEO_ROOTS'));
+    $envRoots = parse_env_path_list(read_runtime_setting('PLAYBACK_VIDEO_ROOTS'));
     foreach ($envRoots as $rootPath) {
         $roots[] = array('dir' => $rootPath, 'urlPrefix' => 'videos');
     }
@@ -423,7 +446,7 @@ function add_playback_http_records_recursive($rootBase, $currentUrl, $relativeDi
 
 function collect_playback_video_records()
 {
-    $httpBase = trim((string) getenv('PLAYBACK_VIDEO_HTTP_BASE'));
+    $httpBase = read_runtime_setting('PLAYBACK_VIDEO_HTTP_BASE');
     if ($httpBase === '') {
         $origin = get_request_origin();
         if ($origin !== '') {
