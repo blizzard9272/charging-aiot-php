@@ -8,6 +8,9 @@ Type=oneshot
 User=www-data
 Group=www-data
 WorkingDirectory=/var/www/charging-platform/charging-aiot-php
+Environment=MEDIAMTX_AUTO_SYNC_RUNTIME_DIR=/tmp/charging-aiot-runtime
+ExecStartPre=/usr/bin/mkdir -p /tmp/charging-aiot-runtime
+ExecStartPre=/usr/bin/chown www-data:www-data /tmp/charging-aiot-runtime
 ExecStart=/usr/bin/php /var/www/charging-platform/charging-aiot-php/scripts/sync_mediamtx_from_db.php
 StandardOutput=journal
 StandardError=journal

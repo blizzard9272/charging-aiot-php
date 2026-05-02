@@ -110,6 +110,13 @@ class MediaMtxClient
                     ];
                 }
 
+                if ($this->isPathAlreadyExistsError($syncResult)) {
+                    $replaceResult = $this->replacePathConfig($name, $body, $mismatches);
+                    if (!empty($replaceResult['success'])) {
+                        return $replaceResult;
+                    }
+                }
+
                 return [
                     'success' => false,
                     'code' => intval($syncResult['code'] ?? 409),
@@ -378,6 +385,67 @@ class MediaMtxClient
                         return true;
                     }
                 }
+            }
+        }
+
+        return false;
+    }
+
+    private function replacePathConfig(string $pathName, array $body, array $mismatches): array
+    {
+        $removeResult = $this->pathConfigClient->deletePathConfig($pathName);
+        if (!is_array($removeResult) || empty($removeResult['success'])) {
+            return [
+                'success' => false,
+                'code' => intval($removeResult['code'] ?? 500),
+                'data' => [
+                    'message' => 'failed to replace existing MediaMTX path config',
+                    'step' => 'remove',
+                    'mismatches' => $mismatches,
+                    'error' => is_array($removeResult) ? ($removeResult['data'] ?? 'unknown error') : 'unknown error'
+                ]
+            ];
+        }
+
+        $addResult = $this->pathConfigClient->addPathConfig($pathName, $body);
+        if (!is_array($addResult) || empty($addResult['success'])) {
+            return [
+                'success' => false,
+                'code' => intval($addResult['code'] ?? 500),
+                'data' => [
+                    'message' => 'failed to recreate MediaMTX path config after removing old config',
+                    'step' => 'add',
+                    'mismatches' => $mismatches,
+                    'error' => is_array($addResult) ? ($addResult['data'] ?? 'unknown error') : 'unknown error'
+                ]
+            ];
+        }
+
+        return [
+            'success' => true,
+            'code' => intval($addResult['code'] ?? 200),
+            'data' => [
+                'exists' => true,
+                'updated' => true,
+                'replaced' => true,
+                'mismatches' => $mismatches,
+                'config' => $addResult['data']
+            ]
+        ];
+    }
+
+    private function isPathAlreadyExistsError(array $result): bool
+    {
+        $payload = $result['data'] ?? null;
+
+        if (is_string($payload)) {
+            return stripos($payload, 'path already exists') !== false;
+        }
+
+        if (is_array($payload)) {
+            $json = json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+            if (is_string($json) && stripos($json, 'path already exists') !== false) {
+                return true;
             }
         }
 
