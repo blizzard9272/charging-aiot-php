@@ -368,7 +368,7 @@ function build_record_time_from_name($filename)
     return null;
 }
 
-function add_playback_http_records_recursive($rootBase, $currentUrl, $relativeDir, &$records, &$seenKeys, &$visitedDirs, $depth = 0)
+function add_playback_http_records_recursive($rootBase, $currentUrl, $relativeDir, &$records, &$seenKeys, &$visitedDirs, $depth = 0, &$debugState = null)
 {
     if ($depth > 10) {
         return;
@@ -386,13 +386,39 @@ function add_playback_http_records_recursive($rootBase, $currentUrl, $relativeDi
         return;
     }
     $visitedDirs[$current] = true;
+    if (is_array($debugState)) {
+        if (!isset($debugState['visitedDirs']) || !is_array($debugState['visitedDirs'])) {
+            $debugState['visitedDirs'] = array();
+        }
+        $debugState['visitedDirs'][] = array(
+            'url' => $current,
+            'depth' => $depth,
+            'relativeDir' => $relativeDir
+        );
+    }
 
     $html = fetch_http_text($current, 6);
     if (!is_string($html) || trim($html) === '') {
+        if (is_array($debugState)) {
+            if (!isset($debugState['emptyHttpResponses']) || !is_array($debugState['emptyHttpResponses'])) {
+                $debugState['emptyHttpResponses'] = array();
+            }
+            $debugState['emptyHttpResponses'][] = $current;
+        }
         return;
     }
 
     $entries = parse_http_index_entries($html);
+    if (is_array($debugState) && $depth === 0) {
+        $debugState['rootHttpEntries'] = array();
+        foreach ($entries as $entry) {
+            $debugState['rootHttpEntries'][] = array(
+                'href' => isset($entry['href']) ? $entry['href'] : '',
+                'name' => isset($entry['name']) ? $entry['name'] : '',
+                'isDir' => !empty($entry['isDir'])
+            );
+        }
+    }
     foreach ($entries as $entry) {
         $resolved = resolve_http_url($current, isset($entry['href']) ? $entry['href'] : '');
         if ($resolved === '' || strpos($resolved, $root) !== 0) {
@@ -407,12 +433,23 @@ function add_playback_http_records_recursive($rootBase, $currentUrl, $relativeDi
 
         $isDir = !empty($entry['isDir']);
         if ($isDir) {
-            add_playback_http_records_recursive($root, $resolved, $relative, $records, $seenKeys, $visitedDirs, $depth + 1);
+            add_playback_http_records_recursive($root, $resolved, $relative, $records, $seenKeys, $visitedDirs, $depth + 1, $debugState);
             continue;
         }
 
         $ext = strtolower(pathinfo($relative, PATHINFO_EXTENSION));
         if (!in_array($ext, array('mp4', 'mov', 'm4v', 'webm', 'm3u8'), true)) {
+            if (is_array($debugState)) {
+                if (!isset($debugState['skippedHttpFiles']) || !is_array($debugState['skippedHttpFiles'])) {
+                    $debugState['skippedHttpFiles'] = array();
+                }
+                if (count($debugState['skippedHttpFiles']) < 50) {
+                    $debugState['skippedHttpFiles'][] = array(
+                        'path' => $relative,
+                        'extension' => $ext
+                    );
+                }
+            }
             continue;
         }
 
@@ -446,6 +483,7 @@ function add_playback_http_records_recursive($rootBase, $currentUrl, $relativeDi
 
 function collect_playback_video_records()
 {
+    $debugEnabled = isset($_GET['debug']) && strval($_GET['debug']) === '1';
     $httpBase = read_runtime_setting('PLAYBACK_VIDEO_HTTP_BASE');
     if ($httpBase === '') {
         $origin = get_request_origin();
@@ -457,6 +495,26 @@ function collect_playback_video_records()
     }
     $httpBase = rtrim($httpBase, '/') . '/';
     $candidateRoots = build_playback_scan_roots();
+    $debugState = $debugEnabled ? array(
+        'debugEnabled' => true,
+        'settings' => array(
+            'PLAYBACK_VIDEO_ROOTS' => read_runtime_setting('PLAYBACK_VIDEO_ROOTS'),
+            'PLAYBACK_VIDEO_HTTP_BASE' => read_runtime_setting('PLAYBACK_VIDEO_HTTP_BASE')
+        ),
+        'httpBase' => $httpBase,
+        'scanRoots' => array(),
+        'usedLocalRoots' => array(),
+        'localFilesByRoot' => array(),
+        'rootHttpEntries' => array(),
+        'visitedDirs' => array(),
+        'emptyHttpResponses' => array(),
+        'skippedHttpFiles' => array()
+    ) : null;
+    if ($debugEnabled) {
+        foreach ($candidateRoots as $rootItem) {
+            $debugState['scanRoots'][] = isset($rootItem['dir']) ? (string) $rootItem['dir'] : '';
+        }
+    }
 
     $records = array();
     $seenKeys = array();
@@ -464,6 +522,12 @@ function collect_playback_video_records()
         $dir = isset($rootItem['dir']) ? (string) $rootItem['dir'] : '';
         if ($dir === '' || !is_dir($dir)) {
             continue;
+        }
+        if ($debugEnabled) {
+            $debugState['usedLocalRoots'][] = $dir;
+            if (!isset($debugState['localFilesByRoot'][$dir])) {
+                $debugState['localFilesByRoot'][$dir] = array();
+            }
         }
 
         $base = rtrim(str_replace('\\', '/', $dir), '/');
@@ -495,6 +559,9 @@ function collect_playback_video_records()
 
             $filename = pathinfo($relative, PATHINFO_FILENAME);
             $timestampSec = intval($fileInfo->getMTime());
+            if ($debugEnabled && count($debugState['localFilesByRoot'][$dir]) < 50) {
+                $debugState['localFilesByRoot'][$dir][] = $relative;
+            }
             $records[] = array(
                 'id' => abs(crc32($relative)) ?: (count($records) + 1),
                 'name' => str_replace('_', ' ', $filename),
@@ -509,12 +576,15 @@ function collect_playback_video_records()
     }
 
     $visitedDirs = array();
-    add_playback_http_records_recursive($httpBase, $httpBase, '', $records, $seenKeys, $visitedDirs, 0);
+    add_playback_http_records_recursive($httpBase, $httpBase, '', $records, $seenKeys, $visitedDirs, 0, $debugState);
 
     usort($records, function ($a, $b) {
         return intval($b['recordTimeMs']) - intval($a['recordTimeMs']);
     });
-    return $records;
+    return array(
+        'records' => $records,
+        'debug' => $debugState
+    );
 }
 
 function handle_playback_list(PDO $pdo)
@@ -533,7 +603,9 @@ function handle_playback_list(PDO $pdo)
     $startTimeMs = normalize_datetime_to_timestamp_ms(isset($_GET['startTime']) ? $_GET['startTime'] : null);
     $endTimeMs = normalize_datetime_to_timestamp_ms(isset($_GET['endTime']) ? $_GET['endTime'] : null);
 
-    $all = collect_playback_video_records();
+    $collection = collect_playback_video_records();
+    $all = isset($collection['records']) && is_array($collection['records']) ? $collection['records'] : array();
+    $debugState = isset($collection['debug']) && is_array($collection['debug']) ? $collection['debug'] : null;
     $filtered = array();
     foreach ($all as $item) {
         $name = strtolower(isset($item['name']) ? (string) $item['name'] : '');
@@ -555,8 +627,19 @@ function handle_playback_list(PDO $pdo)
     $offset = ($page - 1) * $pageSize;
     $records = array_slice($filtered, $offset, $pageSize);
 
-    response_success(array(
+    $responseData = array(
         'total' => $total,
         'records' => array_values($records)
-    ));
+    );
+    if ($debugState !== null) {
+        $debugState['recordCountBeforeFilter'] = count($all);
+        $debugState['recordCountAfterFilter'] = count($filtered);
+        $debugState['sampleRecordPaths'] = array();
+        foreach (array_slice($filtered, 0, 50) as $sampleItem) {
+            $debugState['sampleRecordPaths'][] = isset($sampleItem['videoPath']) ? $sampleItem['videoPath'] : '';
+        }
+        $responseData['debug'] = $debugState;
+    }
+
+    response_success($responseData);
 }
