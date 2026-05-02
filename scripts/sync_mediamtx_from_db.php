@@ -7,6 +7,37 @@ require_once __DIR__ . '/../services/monitor-center/infrastructure/DeviceAuditLo
 require_once __DIR__ . '/../services/monitor-center/integrations/MediaMtxPathConfigClient.php';
 require_once __DIR__ . '/../services/monitor-center/integrations/MediaMtxClient.php';
 
+if (!function_exists('resolve_mediamtx_auto_sync_runtime_dir')) {
+    function resolve_mediamtx_auto_sync_runtime_dir(): string
+    {
+        $envDir = getenv('MEDIAMTX_AUTO_SYNC_RUNTIME_DIR');
+        $candidates = [];
+
+        if (is_string($envDir) && trim($envDir) !== '') {
+            $candidates[] = rtrim(trim($envDir), '/\\');
+        }
+
+        $candidates[] = realpath(dirname(__DIR__) . '/runtime') ?: (dirname(__DIR__) . '/runtime');
+        $candidates[] = rtrim(sys_get_temp_dir(), '/\\') . DIRECTORY_SEPARATOR . 'charging-aiot-runtime';
+
+        foreach ($candidates as $dir) {
+            if (!is_string($dir) || trim($dir) === '') {
+                continue;
+            }
+
+            if (!is_dir($dir) && !@mkdir($dir, 0777, true) && !is_dir($dir)) {
+                continue;
+            }
+
+            if (is_writable($dir)) {
+                return str_replace(['/', '\\'], DIRECTORY_SEPARATOR, $dir);
+            }
+        }
+
+        return str_replace(['/', '\\'], DIRECTORY_SEPARATOR, $candidates[count($candidates) - 1]);
+    }
+}
+
 if (!defined('STREAM_SERVER_IP')) {
     define('STREAM_SERVER_IP', '172.18.7.124');
 }
@@ -16,11 +47,14 @@ if (!defined('STREAM_SERVER_WEBRTC_PORT')) {
 if (!defined('MEDIAMTX_AUTO_SYNC_INTERVAL_SECONDS')) {
     define('MEDIAMTX_AUTO_SYNC_INTERVAL_SECONDS', 30);
 }
+if (!defined('MEDIAMTX_AUTO_SYNC_RUNTIME_DIR')) {
+    define('MEDIAMTX_AUTO_SYNC_RUNTIME_DIR', resolve_mediamtx_auto_sync_runtime_dir());
+}
 if (!defined('MEDIAMTX_AUTO_SYNC_STATE_FILE')) {
-    define('MEDIAMTX_AUTO_SYNC_STATE_FILE', dirname(__DIR__) . '/runtime/mediamtx_auto_sync_state.json');
+    define('MEDIAMTX_AUTO_SYNC_STATE_FILE', MEDIAMTX_AUTO_SYNC_RUNTIME_DIR . DIRECTORY_SEPARATOR . 'mediamtx_auto_sync_state.json');
 }
 if (!defined('MEDIAMTX_AUTO_SYNC_LOCK_FILE')) {
-    define('MEDIAMTX_AUTO_SYNC_LOCK_FILE', dirname(__DIR__) . '/runtime/mediamtx_auto_sync.lock');
+    define('MEDIAMTX_AUTO_SYNC_LOCK_FILE', MEDIAMTX_AUTO_SYNC_RUNTIME_DIR . DIRECTORY_SEPARATOR . 'mediamtx_auto_sync.lock');
 }
 
 require_once __DIR__ . '/../api/monitor-center/common/monitor_support.php';

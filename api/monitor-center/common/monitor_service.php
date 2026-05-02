@@ -9,11 +9,43 @@ require_once __DIR__ . '/../../../services/monitor-center/services/DeviceService
 
 header('Content-Type: application/json; charset=utf-8');
 
-const STREAM_SERVER_IP = '172.18.7.124';
-const STREAM_SERVER_WEBRTC_PORT = 8889;
-const MEDIAMTX_AUTO_SYNC_INTERVAL_SECONDS = 30;
-const MEDIAMTX_AUTO_SYNC_STATE_FILE = __DIR__ . '/../../../runtime/mediamtx_auto_sync_state.json';
-const MEDIAMTX_AUTO_SYNC_LOCK_FILE = __DIR__ . '/../../../runtime/mediamtx_auto_sync.lock';
+if (!function_exists('resolve_mediamtx_auto_sync_runtime_dir')) {
+    function resolve_mediamtx_auto_sync_runtime_dir(): string
+    {
+        $envDir = getenv('MEDIAMTX_AUTO_SYNC_RUNTIME_DIR');
+        $candidates = [];
+
+        if (is_string($envDir) && trim($envDir) !== '') {
+            $candidates[] = rtrim(trim($envDir), '/\\');
+        }
+
+        $candidates[] = realpath(__DIR__ . '/../../../runtime') ?: (__DIR__ . '/../../../runtime');
+        $candidates[] = rtrim(sys_get_temp_dir(), '/\\') . DIRECTORY_SEPARATOR . 'charging-aiot-runtime';
+
+        foreach ($candidates as $dir) {
+            if (!is_string($dir) || trim($dir) === '') {
+                continue;
+            }
+
+            if (!is_dir($dir) && !@mkdir($dir, 0777, true) && !is_dir($dir)) {
+                continue;
+            }
+
+            if (is_writable($dir)) {
+                return str_replace(['/', '\\'], DIRECTORY_SEPARATOR, $dir);
+            }
+        }
+
+        return str_replace(['/', '\\'], DIRECTORY_SEPARATOR, $candidates[count($candidates) - 1]);
+    }
+}
+
+define('STREAM_SERVER_IP', '172.18.7.124');
+define('STREAM_SERVER_WEBRTC_PORT', 8889);
+define('MEDIAMTX_AUTO_SYNC_INTERVAL_SECONDS', 30);
+define('MEDIAMTX_AUTO_SYNC_RUNTIME_DIR', resolve_mediamtx_auto_sync_runtime_dir());
+define('MEDIAMTX_AUTO_SYNC_STATE_FILE', MEDIAMTX_AUTO_SYNC_RUNTIME_DIR . DIRECTORY_SEPARATOR . 'mediamtx_auto_sync_state.json');
+define('MEDIAMTX_AUTO_SYNC_LOCK_FILE', MEDIAMTX_AUTO_SYNC_RUNTIME_DIR . DIRECTORY_SEPARATOR . 'mediamtx_auto_sync.lock');
 
 require_once __DIR__ . '/monitor_support.php';
 require_once __DIR__ . '/monitor_playback.php';
