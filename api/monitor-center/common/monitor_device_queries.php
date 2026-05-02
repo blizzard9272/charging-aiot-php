@@ -1,5 +1,11 @@
 <?php
 
+function resolve_effective_record_enabled($rawEnabled, $recordPath, $recordFormat, $recordPartDuration)
+{
+    $enabled = normalize_int_or_null($rawEnabled);
+    return $enabled === 1 ? 1 : 0;
+}
+
 function handle_page_devices(PDO $pdo)
 {
     if (strtoupper($_SERVER['REQUEST_METHOD']) !== 'GET') {
@@ -168,7 +174,14 @@ function handle_page_devices(PDO $pdo)
         $sourceUrl = $pathInfo ? (string) $pathInfo['source_url'] : null;
         $pathName = $pathInfo ? (string) $pathInfo['path_name'] : '';
         $defaultPlayUrl = build_default_play_url($pathName);
-        $recordEnabled = $pathInfo ? intval($pathInfo['record_enabled']) : 0;
+        $recordEnabled = $pathInfo
+            ? resolve_effective_record_enabled(
+                $pathInfo['record_enabled'] ?? null,
+                $pathInfo['record_path'] ?? '',
+                $pathInfo['record_format'] ?? 'fmp4',
+                $pathInfo['record_part_duration'] ?? null
+            )
+            : 0;
 
         $records[] = [
             'deviceId' => $deviceId,
@@ -298,7 +311,12 @@ function handle_device_form(PDO $pdo, $deviceId)
         'pathName' => isset($row['pathName']) ? (string) $row['pathName'] : '',
         'sourceUrl' => isset($row['sourceUrl']) ? (string) $row['sourceUrl'] : '',
         'streamType' => normalize_int_or_null(isset($row['streamType']) ? $row['streamType'] : null),
-        'recordEnabled' => normalize_int_or_null(isset($row['recordEnabled']) ? $row['recordEnabled'] : null),
+        'recordEnabled' => resolve_effective_record_enabled(
+            isset($row['recordEnabled']) ? $row['recordEnabled'] : null,
+            isset($row['recordPath']) ? $row['recordPath'] : '',
+            isset($row['recordFormat']) ? $row['recordFormat'] : 'fmp4',
+            isset($row['recordPartDuration']) ? $row['recordPartDuration'] : null
+        ),
         'recordPath' => isset($row['recordPath']) ? (string) $row['recordPath'] : '',
         'recordFormat' => isset($row['recordFormat']) ? (string) $row['recordFormat'] : 'fmp4',
         'recordPartDuration' => normalize_int_or_null(isset($row['recordPartDuration']) ? $row['recordPartDuration'] : null),

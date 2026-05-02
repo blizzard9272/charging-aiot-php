@@ -243,30 +243,32 @@ function handle_update_device(PDO $pdo)
                 }
             }
 
-            if ($pathName !== '' && $sourceUrl !== '') {
-                $mtxResult = $mediaMtxClient->ensurePathConfig($pathName, [
-                    'source' => $sourceUrl,
-                    'record' => intval($recordEnabled) === 1,
-                    'recordPath' => $recordPath,
-                    'recordFormat' => $recordFormat,
-                    'recordPartDuration' => $recordPartDuration
-                ]);
-                if (!is_array($mtxResult) || empty($mtxResult['success'])) {
-                    $code = isset($mtxResult['code']) ? intval($mtxResult['code']) : 500;
-                    $msg = isset($mtxResult['data'])
-                        ? (is_string($mtxResult['data']) ? $mtxResult['data'] : json_encode($mtxResult['data'], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES))
-                        : 'MediaMTX path config validation failed';
-                    throw new RuntimeException('MediaMTX path config validation failed(' . $code . '): ' . $msg, $code);
-                }
-                $mediaMtxSyncData = isset($mtxResult['data']) ? $mtxResult['data'] : null;
-            }
-
             if ($oldPathName !== '' && $pathName !== '' && $oldPathName !== $pathName) {
                 $pathNameToCleanup = $oldPathName;
             }
         }
 
         $pdo->commit();
+        if ($pathName !== '' && $sourceUrl !== '') {
+            $mtxResult = $mediaMtxClient->ensurePathConfig($pathName, [
+                'source' => $sourceUrl,
+                'record' => intval($recordEnabled) === 1,
+                'recordPath' => $recordPath,
+                'recordFormat' => $recordFormat,
+                'recordPartDuration' => $recordPartDuration
+            ]);
+            if (!is_array($mtxResult) || empty($mtxResult['success'])) {
+                $mediaMtxWarnings[] = [
+                    'pathName' => $pathName,
+                    'code' => isset($mtxResult['code']) ? intval($mtxResult['code']) : 500,
+                    'message' => isset($mtxResult['data'])
+                        ? (is_string($mtxResult['data']) ? $mtxResult['data'] : json_encode($mtxResult['data'], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES))
+                        : 'MediaMTX path config validation failed'
+                ];
+            } else {
+                $mediaMtxSyncData = isset($mtxResult['data']) ? $mtxResult['data'] : null;
+            }
+        }
         if ($pathNameToCleanup !== '') {
             $reuseStmt = $pdo->prepare('SELECT COUNT(*) FROM sys_camera_path WHERE path_name = ? AND device_id <> ? AND status_flag = 1');
             $reuseStmt->execute([$pathNameToCleanup, $deviceId]);
@@ -418,12 +420,17 @@ function handle_create_device(PDO $pdo)
             'response_payload' => $result
         ]);
 
-        response_success([
+        $responsePayload = [
             'deviceId' => intval(isset($result['device_id']) ? $result['device_id'] : 0),
             'pathUuid' => isset($result['path_uuid']) ? (string) $result['path_uuid'] : '',
             'pathName' => isset($result['path_name']) ? (string) $result['path_name'] : $pathName,
             'sourceUrl' => isset($result['source_url']) ? (string) $result['source_url'] : ''
-        ], 'Device created');
+        ];
+        if (!empty($result['media_mtx_warning']) && is_array($result['media_mtx_warning'])) {
+            $responsePayload['mediaMtxWarnings'] = [$result['media_mtx_warning']];
+        }
+
+        response_success($responsePayload, 'Device created');
     } catch (InvalidArgumentException $e) {
         write_device_audit($pdo, [
             'event_type' => 'CREATE',

@@ -1,0 +1,16 @@
+[Unit]
+Description=Sync charging-aiot camera path config from database to MediaMTX
+After=network-online.target mariadb.service mysql.service mediamtx.service
+Wants=network-online.target mediamtx.service
+
+[Service]
+Type=oneshot
+User=www-data
+Group=www-data
+WorkingDirectory=/var/www/charging-platform/charging-aiot-php
+ExecStart=/usr/bin/php /var/www/charging-platform/charging-aiot-php/scripts/sync_mediamtx_from_db.php
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

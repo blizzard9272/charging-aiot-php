@@ -56,6 +56,8 @@ class DeviceService
 
         $sourceUrl = $this->buildHikvisionSourceUrl($ipAddress, $username, $password, $streamType, $port);
         $deviceId = null;
+        $pathUuid = '';
+        $mediaMtxWarning = null;
 
         $this->pdo->beginTransaction();
         try {
@@ -107,6 +109,8 @@ class DeviceService
                 isset($data['path_status_flag']) ? intval($data['path_status_flag']) : 1
             ]);
 
+            $this->pdo->commit();
+
             $mtxResult = $this->mediaMtxClient->ensurePathConfig($pathName, [
                 'source' => $sourceUrl,
                 'record' => $recordEnabled,
@@ -115,21 +119,22 @@ class DeviceService
                 'recordPartDuration' => $recordPartDuration
             ]);
             if (!is_array($mtxResult) || empty($mtxResult['success'])) {
-                $code = isset($mtxResult['code']) ? intval($mtxResult['code']) : 500;
-                $msg = isset($mtxResult['data'])
-                    ? (is_string($mtxResult['data']) ? $mtxResult['data'] : json_encode($mtxResult['data'], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES))
-                    : 'MediaMTX path config validation failed';
-                throw new RuntimeException('MediaMTX path config validation failed(' . $code . '): ' . $msg, $code);
+                $mediaMtxWarning = [
+                    'pathName' => $pathName,
+                    'code' => isset($mtxResult['code']) ? intval($mtxResult['code']) : 500,
+                    'message' => isset($mtxResult['data'])
+                        ? (is_string($mtxResult['data']) ? $mtxResult['data'] : json_encode($mtxResult['data'], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES))
+                        : 'MediaMTX path config validation failed'
+                ];
             }
-
-            $this->pdo->commit();
 
             return [
                 'device_id' => $deviceId,
                 'path_uuid' => $pathUuid,
                 'path_name' => $pathName,
                 'source_url' => $sourceUrl,
-                'media_mtx' => isset($mtxResult['data']) ? $mtxResult['data'] : ''
+                'media_mtx' => (isset($mtxResult['data']) && empty($mediaMtxWarning)) ? $mtxResult['data'] : '',
+                'media_mtx_warning' => $mediaMtxWarning
             ];
         } catch (Exception $e) {
             if ($this->pdo->inTransaction()) {
