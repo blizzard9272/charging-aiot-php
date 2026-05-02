@@ -368,6 +368,30 @@ function build_record_time_from_name($filename)
     return null;
 }
 
+function increment_top_level_counter(&$bucket, $relativePath)
+{
+    if (!is_array($bucket)) {
+        $bucket = array();
+    }
+
+    $relative = str_replace('\\', '/', (string) $relativePath);
+    $relative = ltrim($relative, '/');
+    if ($relative === '') {
+        return;
+    }
+
+    $segments = explode('/', $relative);
+    $top = isset($segments[0]) ? trim((string) $segments[0]) : '';
+    if ($top === '') {
+        $top = '__root__';
+    }
+
+    if (!isset($bucket[$top])) {
+        $bucket[$top] = 0;
+    }
+    $bucket[$top] += 1;
+}
+
 function add_playback_http_records_recursive($rootBase, $currentUrl, $relativeDir, &$records, &$seenKeys, &$visitedDirs, $depth = 0, &$debugState = null)
 {
     if ($depth > 10) {
@@ -433,6 +457,12 @@ function add_playback_http_records_recursive($rootBase, $currentUrl, $relativeDi
 
         $isDir = !empty($entry['isDir']);
         if ($isDir) {
+            if (is_array($debugState)) {
+                if (!isset($debugState['httpDirHits']) || !is_array($debugState['httpDirHits'])) {
+                    $debugState['httpDirHits'] = array();
+                }
+                increment_top_level_counter($debugState['httpDirHits'], $relative);
+            }
             add_playback_http_records_recursive($root, $resolved, $relative, $records, $seenKeys, $visitedDirs, $depth + 1, $debugState);
             continue;
         }
@@ -443,6 +473,10 @@ function add_playback_http_records_recursive($rootBase, $currentUrl, $relativeDi
                 if (!isset($debugState['skippedHttpFiles']) || !is_array($debugState['skippedHttpFiles'])) {
                     $debugState['skippedHttpFiles'] = array();
                 }
+                if (!isset($debugState['httpSkippedByTopLevel']) || !is_array($debugState['httpSkippedByTopLevel'])) {
+                    $debugState['httpSkippedByTopLevel'] = array();
+                }
+                increment_top_level_counter($debugState['httpSkippedByTopLevel'], $relative);
                 if (count($debugState['skippedHttpFiles']) < 50) {
                     $debugState['skippedHttpFiles'][] = array(
                         'path' => $relative,
@@ -466,6 +500,12 @@ function add_playback_http_records_recursive($rootBase, $currentUrl, $relativeDi
         }
         if ($recordTimeMs <= 0) {
             $recordTimeMs = intval(time()) * 1000;
+        }
+        if (is_array($debugState)) {
+            if (!isset($debugState['httpAcceptedByTopLevel']) || !is_array($debugState['httpAcceptedByTopLevel'])) {
+                $debugState['httpAcceptedByTopLevel'] = array();
+            }
+            increment_top_level_counter($debugState['httpAcceptedByTopLevel'], $relative);
         }
 
         $records[] = array(
@@ -505,8 +545,12 @@ function collect_playback_video_records()
         'scanRoots' => array(),
         'usedLocalRoots' => array(),
         'localFilesByRoot' => array(),
+        'localAcceptedByTopLevel' => array(),
         'rootHttpEntries' => array(),
         'visitedDirs' => array(),
+        'httpDirHits' => array(),
+        'httpAcceptedByTopLevel' => array(),
+        'httpSkippedByTopLevel' => array(),
         'emptyHttpResponses' => array(),
         'skippedHttpFiles' => array()
     ) : null;
@@ -561,6 +605,9 @@ function collect_playback_video_records()
             $timestampSec = intval($fileInfo->getMTime());
             if ($debugEnabled && count($debugState['localFilesByRoot'][$dir]) < 50) {
                 $debugState['localFilesByRoot'][$dir][] = $relative;
+            }
+            if ($debugEnabled) {
+                increment_top_level_counter($debugState['localAcceptedByTopLevel'], $relative);
             }
             $records[] = array(
                 'id' => abs(crc32($relative)) ?: (count($records) + 1),
