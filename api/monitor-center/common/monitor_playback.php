@@ -55,6 +55,17 @@ function guess_desktop_video_dirs()
     return $dirs;
 }
 
+function guess_linux_video_dirs()
+{
+    $dirs = array(
+        '/home/zjl/Desktop/videos',
+        '/home/zjl/Desktop/video',
+        '/home/zjl/OneDrive/Desktop/videos',
+        '/home/zjl/OneDrive/Desktop/video'
+    );
+    return $dirs;
+}
+
 function build_playback_scan_roots()
 {
     $projectRoot = dirname(__DIR__, 3);
@@ -75,6 +86,10 @@ function build_playback_scan_roots()
         $defaultDirs[] = $desktopDir;
     }
 
+    foreach (guess_linux_video_dirs() as $linuxDir) {
+        $defaultDirs[] = $linuxDir;
+    }
+
     foreach ($defaultDirs as $dir) {
         $roots[] = array('dir' => $dir, 'urlPrefix' => 'videos');
     }
@@ -92,6 +107,40 @@ function normalize_http_base_url($url)
         return '';
     }
     return rtrim($base, '/') . '/';
+}
+
+function get_request_origin()
+{
+    $originHeader = isset($_SERVER['HTTP_ORIGIN']) ? trim((string) $_SERVER['HTTP_ORIGIN']) : '';
+    if ($originHeader !== '' && preg_match('/^https?:\/\/[^\/]+$/i', $originHeader)) {
+        return $originHeader;
+    }
+
+    $host = '';
+    if (isset($_SERVER['HTTP_HOST']) && trim((string) $_SERVER['HTTP_HOST']) !== '') {
+        $host = trim((string) $_SERVER['HTTP_HOST']);
+    } elseif (isset($_SERVER['SERVER_NAME']) && trim((string) $_SERVER['SERVER_NAME']) !== '') {
+        $host = trim((string) $_SERVER['SERVER_NAME']);
+        $port = isset($_SERVER['SERVER_PORT']) ? intval($_SERVER['SERVER_PORT']) : 0;
+        if ($port > 0 && $port !== 80 && $port !== 443) {
+            $host .= ':' . $port;
+        }
+    }
+
+    if ($host === '') {
+        return '';
+    }
+
+    $scheme = 'http';
+    if (!empty($_SERVER['REQUEST_SCHEME'])) {
+        $scheme = strtolower((string) $_SERVER['REQUEST_SCHEME']);
+    } elseif (!empty($_SERVER['HTTPS']) && strtolower((string) $_SERVER['HTTPS']) !== 'off') {
+        $scheme = 'https';
+    } elseif (isset($_SERVER['SERVER_PORT']) && intval($_SERVER['SERVER_PORT']) === 443) {
+        $scheme = 'https';
+    }
+
+    return $scheme . '://' . $host;
 }
 
 function fetch_http_text($url, $timeoutSeconds = 5)
@@ -376,7 +425,12 @@ function collect_playback_video_records()
 {
     $httpBase = trim((string) getenv('PLAYBACK_VIDEO_HTTP_BASE'));
     if ($httpBase === '') {
-        $httpBase = 'http://' . STREAM_SERVER_IP . '/videos/';
+        $origin = get_request_origin();
+        if ($origin !== '') {
+            $httpBase = $origin . '/videos/';
+        } else {
+            $httpBase = 'http://' . STREAM_SERVER_IP . '/videos/';
+        }
     }
     $httpBase = rtrim($httpBase, '/') . '/';
     $candidateRoots = build_playback_scan_roots();
@@ -483,4 +537,3 @@ function handle_playback_list(PDO $pdo)
         'records' => array_values($records)
     ));
 }
-
