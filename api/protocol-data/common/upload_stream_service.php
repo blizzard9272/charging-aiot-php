@@ -76,8 +76,9 @@ class TargetVO
     public $y1;
     public $x2;
     public $y2;
+    public $conf;
 
-    public function __construct($type, $tid, $x1, $y1, $x2, $y2)
+    public function __construct($type, $tid, $x1, $y1, $x2, $y2, $conf = null)
     {
         $this->type = $type;
         $this->tid = $tid;
@@ -85,6 +86,7 @@ class TargetVO
         $this->y1 = $y1;
         $this->x2 = $x2;
         $this->y2 = $y2;
+        $this->conf = $conf;
     }
 
     public function toArray()
@@ -95,7 +97,8 @@ class TargetVO
             'x1' => $this->x1,
             'y1' => $this->y1,
             'x2' => $this->x2,
-            'y2' => $this->y2
+            'y2' => $this->y2,
+            'conf' => $this->conf
         );
     }
 }
@@ -313,6 +316,37 @@ function read_u56_le($data, $offset)
         $value |= (byte_at($data, $offset + $i) << ($i * 8));
     }
     return $value;
+}
+
+function read_f32_le($data, $offset)
+{
+    $chunk = substr($data, $offset, 4);
+    if ($chunk === false || strlen($chunk) !== 4) {
+        throw new RuntimeException('binary float offset out of range: ' . $offset);
+    }
+    $arr = unpack('gvalue', $chunk);
+    if (!is_array($arr) || !array_key_exists('value', $arr)) {
+        throw new RuntimeException('failed to unpack float at offset ' . $offset);
+    }
+    return floatval($arr['value']);
+}
+
+function crc16_ccitt_false($binary)
+{
+    $data = is_string($binary) ? $binary : '';
+    $crc = 0xFFFF;
+    $len = strlen($data);
+    for ($i = 0; $i < $len; $i++) {
+        $crc ^= (ord($data[$i]) << 8);
+        for ($bit = 0; $bit < 8; $bit++) {
+            if (($crc & 0x8000) !== 0) {
+                $crc = (($crc << 1) ^ 0x1021) & 0xFFFF;
+            } else {
+                $crc = ($crc << 1) & 0xFFFF;
+            }
+        }
+    }
+    return $crc;
 }
 
 function crc32_unsigned($binary)
@@ -820,7 +854,7 @@ function save_parsed_frames($pdo, $parseResult)
                         intval(isset($target['y1']) ? $target['y1'] : 0),
                         intval(isset($target['x2']) ? $target['x2'] : 0),
                         intval(isset($target['y2']) ? $target['y2'] : 0),
-                        null,
+                        isset($target['conf']) ? strval($target['conf']) : null,
                         intval($targetIndex),
                         intval($frameVO->protocolVersion),
                         intval($frameVO->frameHeader),
@@ -853,6 +887,7 @@ function save_parsed_frames($pdo, $parseResult)
                                 'object_index' => intval($targetIndex)
                             )),
                             'payload_hex_rebuilt' => build_101_payload_hex(array($target)),
+                            'conf' => isset($target['conf']) ? $target['conf'] : null,
                             'frame_target_count' => intval($frameVO->count),
                             'frame_file_path' => $frameFilePath
                         )
@@ -902,7 +937,7 @@ function save_parsed_frames($pdo, $parseResult)
                         'received',
                         $vectorBase64,
                         intval($itemIndex),
-                        512,
+                        intval(isset($item['embedding_dim']) ? $item['embedding_dim'] : 0),
                         strlen($vectorBinary),
                         $vectorPath,
                         strtoupper(bin2hex(substr($vectorBinary, 0, 32))),
@@ -934,7 +969,7 @@ function save_parsed_frames($pdo, $parseResult)
                             'vector_hex_preview' => bin2hex(substr($vectorBinary, 0, 32)),
                             'vector_payload_hex_preview' => bin2hex(substr($vectorBinary, 0, 64)),
                             'vector_base64' => $vectorBase64,
-                            'embedding_dim' => 512,
+                            'embedding_dim' => intval(isset($item['embedding_dim']) ? $item['embedding_dim'] : 0),
                             'frame_file_path' => $frameFilePath,
                             'payload_file_path' => $payloadFilePath,
                             'embedding_file_path' => $vectorPath,
@@ -950,7 +985,10 @@ function save_parsed_frames($pdo, $parseResult)
             if ($protocol === 103) {
                 $payloadBinary = is_string($frameVO->payloadBinary) ? $frameVO->payloadBinary : '';
                 $payloadFilePath = store_protocol_payload_in_project_file(103, $eventTimestamp, $cameraCode, $frameIndex, $payloadBinary, 'bin');
-                $imagePath = store_protocol_payload_in_project_file(103, $eventTimestamp, $cameraCode, $frameIndex, $payloadBinary, 'jpg');
+                $isJpegPayload = intval($frameVO->payloadType) === 1;
+                $imagePath = $isJpegPayload
+                    ? store_protocol_payload_in_project_file(103, $eventTimestamp, $cameraCode, $frameIndex, $payloadBinary, 'jpg')
+                    : null;
                 $normalizedJson = encode_json_text(array(
                     'protocol' => 103,
                     'camera_id' => $cameraCode,
@@ -961,8 +999,8 @@ function save_parsed_frames($pdo, $parseResult)
                     'frame_index' => intval($frameIndex),
                     'payload_type' => intval($frameVO->payloadType),
                     'track_id' => intval($frameVO->trackId),
-                    'start_timestamp' => intval($frameVO->startTimestamp),
-                    'end_timestamp' => intval($frameVO->endTimestamp),
+                    'total_packets' => intval($frameVO->startTimestamp),
+                    'packet_index' => intval($frameVO->endTimestamp),
                     'frame_file_path' => $frameFilePath,
                     'payload_file_path' => $payloadFilePath,
                     'local_image_path' => $imagePath,
@@ -978,7 +1016,7 @@ function save_parsed_frames($pdo, $parseResult)
                     0,
                     0,
                     null,
-                    'success',
+                    $isJpegPayload ? 'success' : 'binary_only',
                     $imagePath,
                     intval($frameIndex),
                     strlen($payloadBinary),
@@ -1008,13 +1046,13 @@ function save_parsed_frames($pdo, $parseResult)
                         'count' => intval($frameVO->count),
                         'payload_type' => intval($frameVO->payloadType),
                         'tid' => intval($frameVO->trackId),
-                        'start_timestamp' => intval($frameVO->startTimestamp),
-                        'end_timestamp' => intval($frameVO->endTimestamp),
+                        'total_packets' => intval($frameVO->startTimestamp),
+                        'packet_index' => intval($frameVO->endTimestamp),
                         'payload_size' => strlen($payloadBinary),
                         'image_hex_preview' => bin2hex(substr($payloadBinary, 0, 64)),
-                        'base64_image' => $base64Image,
-                        'image_data_url' => 'data:image/jpeg;base64,' . $base64Image,
-                        'image_fetch_status' => 'success',
+                        'base64_image' => $isJpegPayload ? $base64Image : null,
+                        'image_data_url' => $isJpegPayload ? ('data:image/jpeg;base64,' . $base64Image) : null,
+                        'image_fetch_status' => $isJpegPayload ? 'success' : 'binary_only',
                         'frame_file_path' => $frameFilePath,
                         'payload_file_path' => $payloadFilePath,
                         'local_image_path' => $imagePath,
@@ -1038,28 +1076,26 @@ function save_parsed_frames($pdo, $parseResult)
 function parseBinaryStream($binaryData, $expectedProtocol, $expectedCamId)
 {
     $totalLen = strlen($binaryData);
-    if ($totalLen < 36) {
-        throw new RuntimeException('binary stream is too short, minimum length is 36 bytes');
+    if ($totalLen < 20) {
+        throw new RuntimeException('binary stream is too short, minimum length is 20 bytes');
     }
 
     $cursor = 0;
     $frames = array();
+    $frameSeq = 1;
 
-    while (($cursor + 36) <= $totalLen) {
-        if (byte_at($binaryData, $cursor) !== 0xAA
-            || byte_at($binaryData, $cursor + 1) !== 0xAA
-            || byte_at($binaryData, $cursor + 2) !== 0xBB
-            || byte_at($binaryData, $cursor + 3) !== 0xBB) {
+    while (($cursor + 20) <= $totalLen) {
+        if (byte_at($binaryData, $cursor) !== 0x55
+            || byte_at($binaryData, $cursor + 1) !== 0xAA) {
             throw new RuntimeException('invalid frame header at offset ' . $cursor);
         }
 
-        $frameHeader = 0xAAAABBBB;
-        $protocolVersion = byte_at($binaryData, $cursor + 4);
-        $protocolId = read_u16_le($binaryData, $cursor + 6);
-        $frameSeq = read_u32_le($binaryData, $cursor + 8);
-        $frameLength = read_u32_le($binaryData, $cursor + 12);
+        $frameHeader = 0x55AA;
+        $protocolVersion = 1;
+        $frameLength = (byte_at($binaryData, $cursor + 2) << 8) | byte_at($binaryData, $cursor + 3);
+        $protocolId = (byte_at($binaryData, $cursor + 4) << 8) | byte_at($binaryData, $cursor + 5);
 
-        if ($frameLength < 36) {
+        if ($frameLength < 20) {
             throw new RuntimeException('invalid frame length ' . $frameLength . ' at offset ' . $cursor);
         }
 
@@ -1067,21 +1103,32 @@ function parseBinaryStream($binaryData, $expectedProtocol, $expectedCamId)
             throw new RuntimeException('incomplete frame data at offset ' . $cursor);
         }
 
-        $camId = read_u16_le($binaryData, $cursor + 16);
-        $count = read_u16_le($binaryData, $cursor + 18);
-        $timestamp = read_u64_le($binaryData, $cursor + 20);
-
-        $payloadLength = $frameLength - 36;
-        $payloadOffset = $cursor + 28;
+        $camId = read_u32_le(strrev(substr($binaryData, $cursor + 6, 4)), 0);
+        $camId = (byte_at($binaryData, $cursor + 6) << 24)
+            | (byte_at($binaryData, $cursor + 7) << 16)
+            | (byte_at($binaryData, $cursor + 8) << 8)
+            | byte_at($binaryData, $cursor + 9);
+        $timestamp = (
+            (byte_at($binaryData, $cursor + 10) << 24)
+            | (byte_at($binaryData, $cursor + 11) << 16)
+            | (byte_at($binaryData, $cursor + 12) << 8)
+            | byte_at($binaryData, $cursor + 13)
+        ) * 1000;
+        $payloadLength = (byte_at($binaryData, $cursor + 14) << 8) | byte_at($binaryData, $cursor + 15);
+        $payloadOffset = $cursor + 16;
         $tailOffset = $payloadOffset + $payloadLength;
-        $crc = read_u32_le($binaryData, $tailOffset);
-        $tail = read_u32_le($binaryData, $tailOffset + 4);
-        if ($tail !== 0xFFFFFFFF) {
+        if (($tailOffset + 4) > ($cursor + $frameLength)) {
+            throw new RuntimeException('payload length exceeds frame boundary at offset ' . $cursor);
+        }
+
+        $crc = (byte_at($binaryData, $tailOffset) << 8) | byte_at($binaryData, $tailOffset + 1);
+        $tail = (byte_at($binaryData, $tailOffset + 2) << 8) | byte_at($binaryData, $tailOffset + 3);
+        if ($tail !== 0xAA55) {
             throw new RuntimeException('invalid frame tail at offset ' . $tailOffset);
         }
 
-        $crcBinary = substr($binaryData, $cursor, $frameLength - 8);
-        $crcCalculated = crc32_unsigned($crcBinary);
+        $crcBinary = substr($binaryData, $cursor + 4, $frameLength - 8);
+        $crcCalculated = crc16_ccitt_false($crcBinary);
         if ($crcCalculated !== $crc) {
             throw new RuntimeException('crc mismatch at offset ' . $cursor . ': recv=' . sprintf('%u', $crc) . ', calc=' . sprintf('%u', $crcCalculated));
         }
@@ -1106,26 +1153,35 @@ function parseBinaryStream($binaryData, $expectedProtocol, $expectedCamId)
         }
 
         if ($protocolId === 101) {
-            if (($payloadLength % 12) !== 0) {
-                throw new RuntimeException('protocol 101 payload size must be a multiple of 12 bytes');
+            if ($payloadLength < 8) {
+                throw new RuntimeException('protocol 101 payload size must be at least 8 bytes');
             }
 
-            $maxCount = intval($payloadLength / 12);
+            $count = read_u16_le($binaryData, $payloadOffset);
+            $frameMeta['frame_width'] = read_u16_le($binaryData, $payloadOffset + 2);
+            $frameMeta['frame_height'] = read_u16_le($binaryData, $payloadOffset + 4);
+            $frameMeta['reserved'] = read_u16_le($binaryData, $payloadOffset + 6);
+
+            $targetsByteLength = $payloadLength - 8;
+            if (($targetsByteLength % 12) !== 0) {
+                throw new RuntimeException('protocol 101 target payload size must be a multiple of 12 bytes');
+            }
+
+            $maxCount = intval($targetsByteLength / 12);
             if ($count !== $maxCount) {
                 throw new RuntimeException('protocol 101 count does not match payload capacity');
             }
 
             $targets = array();
             for ($i = 0; $i < $count; $i++) {
-                $offset = $payloadOffset + ($i * 12);
-                $type = read_u16_le($binaryData, $offset);
-                $tid = read_u16_le($binaryData, $offset + 2);
-                $x1 = read_u16_le($binaryData, $offset + 4);
-                $y1 = read_u16_le($binaryData, $offset + 6);
-                $x2 = read_u16_le($binaryData, $offset + 8);
-                $y2 = read_u16_le($binaryData, $offset + 10);
-
-                $targets[] = (new TargetVO($type, $tid, $x1, $y1, $x2, $y2))->toArray();
+                $offset = $payloadOffset + 8 + ($i * 12);
+                $x1 = read_u16_le($binaryData, $offset);
+                $y1 = read_u16_le($binaryData, $offset + 2);
+                $x2 = read_u16_le($binaryData, $offset + 4);
+                $y2 = read_u16_le($binaryData, $offset + 6);
+                $confRaw = read_u16_le($binaryData, $offset + 8);
+                $tid = read_u16_le($binaryData, $offset + 10);
+                $targets[] = (new TargetVO(0, $tid, $x1, $y1, $x2, $y2, $confRaw))->toArray();
             }
 
             $frames[] = new StreamFrameVO(101, $camId, $timestamp, $count, $targets, null, null, $frameMeta);
@@ -1135,58 +1191,68 @@ function parseBinaryStream($binaryData, $expectedProtocol, $expectedCamId)
                 throw new RuntimeException('failed to read protocol 102 payload');
             }
 
-            $unitLength = 2052;
-            if (($payloadLength % $unitLength) !== 0) {
-                throw new RuntimeException('protocol 102 payload size must be a multiple of 2052 bytes');
+            if ($payloadLength < 4) {
+                throw new RuntimeException('protocol 102 payload size must be at least 4 bytes');
             }
 
-            $vectorCount = intval($payloadLength / $unitLength);
-            if ($count !== $vectorCount) {
-                throw new RuntimeException('protocol 102 count does not match payload capacity');
+            $tid = read_u16_le($payload, 0);
+            $embeddingDim = read_u16_le($payload, 2);
+            $vectorBinary = substr($payload, 4);
+            if ($vectorBinary === false) {
+                throw new RuntimeException('failed to read protocol 102 vector payload');
+            }
+            if (strlen($vectorBinary) !== ($embeddingDim * 4)) {
+                throw new RuntimeException('protocol 102 vector byte length does not match dimension');
             }
 
+            $preview = array();
+            $previewCount = min(4, $embeddingDim);
+            for ($i = 0; $i < $previewCount; $i++) {
+                $preview[] = read_f32_le($vectorBinary, $i * 4);
+            }
             $items = array();
-            for ($i = 0; $i < $count; $i++) {
-                $itemOffset = $i * $unitLength;
-                $type = read_u16_le($payload, $itemOffset);
-                $tid = read_u16_le($payload, $itemOffset + 2);
-                $vectorBinary = substr($payload, $itemOffset + 4, 2048);
-                if ($vectorBinary === false || strlen($vectorBinary) !== 2048) {
-                    throw new RuntimeException('failed to read protocol 102 vector payload at index ' . $i);
-                }
-                $items[] = array(
-                    'type' => $type,
-                    'tid' => $tid,
-                    'vector_binary' => $vectorBinary
-                );
-            }
+            $items[] = array(
+                'type' => 0,
+                'tid' => $tid,
+                'vector_binary' => $vectorBinary,
+                'embedding_dim' => $embeddingDim,
+                'vector_preview' => $preview
+            );
 
             $frameMeta['payload_items'] = $items;
-            $frames[] = new StreamFrameVO(102, $camId, $timestamp, $count, array(), null, $payload, $frameMeta);
+            $frames[] = new StreamFrameVO(102, $camId, $timestamp, 1, array(), null, $payload, $frameMeta);
         } elseif ($protocolId === 103) {
-            if ($payloadLength < 20) {
-                throw new RuntimeException('protocol 103 payload size must be at least 20 bytes');
+            if ($payloadLength < 16) {
+                throw new RuntimeException('protocol 103 payload size must be at least 16 bytes');
             }
 
             $payloadType = read_u16_le($binaryData, $payloadOffset);
             $trackId = read_u16_le($binaryData, $payloadOffset + 2);
-            $startTimestamp = read_u64_le($binaryData, $payloadOffset + 4);
-            $endTimestamp = read_u64_le($binaryData, $payloadOffset + 12);
-            $payload = substr($binaryData, $payloadOffset + 20, $payloadLength - 20);
+            $totalPackets = read_u16_le($binaryData, $payloadOffset + 4);
+            $packetIndex = read_u16_le($binaryData, $payloadOffset + 6);
+            $mediaTotalSize = read_u32_le($binaryData, $payloadOffset + 8);
+            $chunkLength = read_u32_le($binaryData, $payloadOffset + 12);
+            $payload = substr($binaryData, $payloadOffset + 16, $payloadLength - 16);
             if ($payload === false) {
-                throw new RuntimeException('failed to read protocol 103 image payload');
+                throw new RuntimeException('failed to read protocol 103 media payload');
+            }
+            if (strlen($payload) !== $chunkLength) {
+                throw new RuntimeException('protocol 103 chunk length does not match payload size');
             }
 
             $frameMeta['payload_type'] = $payloadType;
             $frameMeta['track_id'] = $trackId;
-            $frameMeta['start_timestamp'] = $startTimestamp;
-            $frameMeta['end_timestamp'] = $endTimestamp;
-            $frames[] = new StreamFrameVO(103, $camId, $timestamp, $count, array(), base64_encode($payload), $payload, $frameMeta);
+            $frameMeta['start_timestamp'] = $totalPackets;
+            $frameMeta['end_timestamp'] = $packetIndex;
+            $frameMeta['media_total_size'] = $mediaTotalSize;
+            $frameMeta['chunk_length'] = $chunkLength;
+            $frames[] = new StreamFrameVO(103, $camId, $timestamp, $totalPackets, array(), base64_encode($payload), $payload, $frameMeta);
         } else {
             throw new RuntimeException('unsupported protocol in frame: ' . $protocolId);
         }
 
         $cursor += $frameLength;
+        $frameSeq += 1;
     }
 
     if ($cursor !== $totalLen) {
