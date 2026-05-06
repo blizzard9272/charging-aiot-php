@@ -135,7 +135,12 @@ CREATE TABLE IF NOT EXISTS `message_101_records` (
   `camera_id` VARCHAR(128) NOT NULL,
   `event_timestamp_ms` BIGINT NOT NULL,
   `track_id` BIGINT DEFAULT NULL,
+  `face_id` BIGINT DEFAULT NULL,
   `obj_type` INT DEFAULT NULL,
+  `frame_face_count` INT DEFAULT NULL,
+  `frame_width` INT DEFAULT NULL,
+  `frame_height` INT DEFAULT NULL,
+  `reserved_value` INT DEFAULT NULL,
   `x1` INT DEFAULT NULL,
   `y1` INT DEFAULT NULL,
   `x2` INT DEFAULT NULL,
@@ -162,6 +167,7 @@ CREATE TABLE IF NOT EXISTS `message_102_records` (
   `camera_id` VARCHAR(128) NOT NULL,
   `event_timestamp_ms` BIGINT NOT NULL,
   `track_id` BIGINT DEFAULT NULL,
+  `face_id` BIGINT DEFAULT NULL,
   `obj_type` INT DEFAULT NULL,
   `information` LONGTEXT,
   `person_name` VARCHAR(255) DEFAULT NULL,
@@ -193,7 +199,19 @@ CREATE TABLE IF NOT EXISTS `message_103_records` (
   `camera_id` VARCHAR(128) NOT NULL,
   `event_timestamp_ms` BIGINT NOT NULL,
   `track_id` BIGINT DEFAULT NULL,
+  `face_id` BIGINT DEFAULT NULL,
   `obj_type` INT DEFAULT NULL,
+  `media_type` INT DEFAULT NULL,
+  `total_packets` INT DEFAULT 0,
+  `packet_index` INT DEFAULT 0,
+  `media_total_size` BIGINT DEFAULT 0,
+  `chunk_length` BIGINT DEFAULT 0,
+  `received_packets` INT DEFAULT 0,
+  `received_media_size` BIGINT DEFAULT 0,
+  `is_complete_media` TINYINT(1) DEFAULT 0,
+  `media_kind` VARCHAR(32) DEFAULT NULL,
+  `start_timestamp_ms` BIGINT DEFAULT NULL,
+  `end_timestamp_ms` BIGINT DEFAULT NULL,
   `person_count` INT DEFAULT 0,
   `car_count` INT DEFAULT 0,
   `frame_image_url` VARCHAR(255) DEFAULT NULL,
@@ -219,11 +237,11 @@ CREATE TABLE IF NOT EXISTS `message_103_records` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 INSERT INTO `storage_path_settings` (`category_key`, `path_template`) VALUES
-  ('raw_upload', 'storage/{date}/{protocol}/{camera}/raw_upload'),
-  ('frame', 'storage/{date}/{protocol}/{camera}/frame'),
-  ('payload', 'storage/{date}/{protocol}/{camera}/payload'),
-  ('image', 'storage/{date}/{protocol}/{camera}/image'),
-  ('embedding', 'storage/{date}/{protocol}/{camera}/embedding/batch_{batch}')
+  ('raw_upload', 'storage/{date}/protocol_{protocol}/{camera}/raw'),
+  ('frame', 'storage/{date}/protocol_{protocol}/{camera}/frame'),
+  ('payload', 'storage/{date}/protocol_{protocol}/{camera}/payload'),
+  ('image', 'storage/{date}/protocol_{protocol}/{camera}/media'),
+  ('embedding', 'storage/{date}/protocol_{protocol}/{camera}/vector/batch_{batch}')
 ON DUPLICATE KEY UPDATE `path_template` = VALUES(`path_template`);
 
 INSERT INTO `sys_device_group` (`group_uuid`, `group_name`, `sort`, `status_flag`) VALUES

@@ -115,6 +115,23 @@ function compact_hex($value, $maxLength = 160)
     return substr($text, 0, $maxLength);
 }
 
+function build_public_media_url($relativePath)
+{
+    $path = trim(strval($relativePath));
+    if ($path === '') {
+        return '';
+    }
+    if (preg_match('#^https?://#i', $path) === 1) {
+        return $path;
+    }
+    return '/' . ltrim($path, '/');
+}
+
+function build_record_media_url($protocolId, $recordId)
+{
+    return '/charging-aiot-php/api/protocol-data/data-center/media.php?protocol=' . intval($protocolId) . '&record_id=' . intval($recordId);
+}
+
 function is_visual_target_row($target)
 {
     if (!is_array($target)) {
@@ -254,10 +271,13 @@ function build_select_sql($protocol, $cameraId, $timestamps, $startEventTime, $e
     $params = array_merge($params, $whereParams);
 
     if ($protocol === 101) {
-        return "SELECT id, 101 protocol_id, batch_id, camera_id, event_timestamp_ms, track_id, obj_type,
+        return "SELECT id, 101 protocol_id, batch_id, camera_id, event_timestamp_ms, track_id, face_id, obj_type,
+                frame_face_count, frame_width, frame_height, reserved_value,
                 NULL information, NULL person_name, NULL status_text, NULL feature_data, NULL embedding_dim,
                 NULL embedding_byte_length, NULL embedding_file_path, NULL embedding_preview,
-                NULL person_count, NULL car_count, NULL frame_image_url, NULL image_fetch_status,
+                NULL media_type, NULL total_packets, NULL packet_index, NULL media_total_size, NULL chunk_length,
+                NULL received_packets, NULL received_media_size, NULL is_complete_media, NULL media_kind,
+                NULL start_timestamp_ms, NULL end_timestamp_ms, NULL person_count, NULL car_count, NULL frame_image_url, NULL image_fetch_status,
                 NULL local_image_path, NULL image_byte_length, x1, y1, x2, y2, conf, object_index,
                 NULL error_message,
                 protocol_version, frame_header, frame_tail, crc_value, frame_length, raw_protocol_hex,
@@ -266,10 +286,13 @@ function build_select_sql($protocol, $cameraId, $timestamps, $startEventTime, $e
     }
 
     if ($protocol === 102) {
-        return "SELECT id, 102 protocol_id, batch_id, camera_id, event_timestamp_ms, track_id, obj_type,
+        return "SELECT id, 102 protocol_id, batch_id, camera_id, event_timestamp_ms, track_id, face_id, obj_type,
+                NULL frame_face_count, NULL frame_width, NULL frame_height, NULL reserved_value,
                 information, person_name, status_text, feature_data, embedding_dim, embedding_byte_length,
                 embedding_file_path, embedding_preview, NULL person_count, NULL car_count, NULL frame_image_url,
-                NULL image_fetch_status, NULL local_image_path, NULL image_byte_length,
+                NULL media_type, NULL total_packets, NULL packet_index, NULL media_total_size, NULL chunk_length,
+                NULL received_packets, NULL received_media_size, NULL is_complete_media, NULL media_kind,
+                NULL start_timestamp_ms, NULL end_timestamp_ms, NULL image_fetch_status, NULL local_image_path, NULL image_byte_length,
                 NULL x1, NULL y1, NULL x2, NULL y2, NULL conf, vector_index object_index,
                 NULL error_message,
                 protocol_version, frame_header, frame_tail, crc_value, frame_length, raw_protocol_hex,
@@ -277,9 +300,12 @@ function build_select_sql($protocol, $cameraId, $timestamps, $startEventTime, $e
                 FROM message_102_records" . $where;
     }
 
-    return "SELECT id, 103 protocol_id, batch_id, camera_id, event_timestamp_ms, track_id, obj_type,
+    return "SELECT id, 103 protocol_id, batch_id, camera_id, event_timestamp_ms, track_id, face_id, obj_type,
+            NULL frame_face_count, NULL frame_width, NULL frame_height, NULL reserved_value,
             NULL information, NULL person_name, NULL status_text, NULL feature_data, NULL embedding_dim,
             NULL embedding_byte_length, NULL embedding_file_path, NULL embedding_preview,
+            media_type, total_packets, packet_index, media_total_size, chunk_length,
+            received_packets, received_media_size, is_complete_media, media_kind, start_timestamp_ms, end_timestamp_ms,
             person_count, car_count, frame_image_url, image_fetch_status, local_image_path, image_byte_length,
             NULL x1, NULL y1, NULL x2, NULL y2, NULL conf, image_index object_index,
             error_message,
@@ -295,12 +321,14 @@ function normalize_record($row, $includePayload)
     $cameraId = strval($row['camera_id']);
     $normalized = json_decode_array(isset($row['normalized_json']) ? $row['normalized_json'] : '');
 
+    $mediaEndpoint = build_record_media_url($protocolId, $recordId);
     $common = array(
         'record_id' => $recordId,
         'cam_id' => camera_code_to_int($cameraId),
         'camera_id' => $cameraId,
         'protocol_id' => $protocolId,
         'track_id' => intval(isset($row['track_id']) ? $row['track_id'] : 0),
+        'face_id' => intval(isset($row['face_id']) ? $row['face_id'] : (isset($row['track_id']) ? $row['track_id'] : 0)),
         'timestamp' => intval($row['event_timestamp_ms']),
         'batch_id' => intval($row['batch_id']),
         'source_file_name' => isset($normalized['raw_file_path']) ? strval($normalized['raw_file_path']) : '',
@@ -321,6 +349,7 @@ function normalize_record($row, $includePayload)
         $target = array(
             'type' => intval(isset($row['obj_type']) ? $row['obj_type'] : 0),
             'tid' => intval(isset($row['track_id']) ? $row['track_id'] : 0),
+            'face_id' => intval(isset($row['face_id']) ? $row['face_id'] : (isset($row['track_id']) ? $row['track_id'] : 0)),
             'x1' => intval(isset($row['x1']) ? $row['x1'] : 0),
             'y1' => intval(isset($row['y1']) ? $row['y1'] : 0),
             'x2' => intval(isset($row['x2']) ? $row['x2'] : 0),
@@ -340,6 +369,10 @@ function normalize_record($row, $includePayload)
             'count' => $targetCount,
             'target_count' => $targetCount,
             'obj_type' => intval(isset($row['obj_type']) ? $row['obj_type'] : 0),
+            'frame_face_count' => intval(isset($row['frame_face_count']) ? $row['frame_face_count'] : (isset($normalized['frame_face_count']) ? $normalized['frame_face_count'] : $frameTargetCount)),
+            'frame_width' => intval(isset($row['frame_width']) ? $row['frame_width'] : (isset($normalized['frame_width']) ? $normalized['frame_width'] : 0)),
+            'frame_height' => intval(isset($row['frame_height']) ? $row['frame_height'] : (isset($normalized['frame_height']) ? $normalized['frame_height'] : 0)),
+            'reserved_value' => intval(isset($row['reserved_value']) ? $row['reserved_value'] : (isset($normalized['reserved_value']) ? $normalized['reserved_value'] : 0)),
             'targets' => array($target),
             'payload_hex_rebuilt' => compact_hex(isset($row['raw_protocol_hex']) ? $row['raw_protocol_hex'] : '', 512),
             'frame_target_count' => $frameTargetCount
@@ -364,6 +397,7 @@ function normalize_record($row, $includePayload)
             'payload_size' => $payloadSize,
             'target_count' => $targetCount,
             'obj_type' => intval(isset($row['obj_type']) ? $row['obj_type'] : 0),
+            'face_id' => intval(isset($row['face_id']) ? $row['face_id'] : (isset($row['track_id']) ? $row['track_id'] : 0)),
             'vector_base64_preview' => $previewBase64,
             'vector_hex_preview' => compact_hex(isset($row['raw_protocol_hex']) ? $row['raw_protocol_hex'] : '', 96),
             'vector_payload_hex_preview' => compact_hex(isset($row['raw_protocol_hex']) ? $row['raw_protocol_hex'] : '', 180),
@@ -380,8 +414,9 @@ function normalize_record($row, $includePayload)
         return $common;
     }
 
+    $mediaKind = strval(isset($normalized['media_kind']) ? $normalized['media_kind'] : 'image');
     $imageDataUrl = '';
-    if ($includePayload) {
+    if ($includePayload && $mediaKind === 'image') {
         $imageDataUrl = base64_image_from_path(isset($row['local_image_path']) ? $row['local_image_path'] : '');
     }
 
@@ -396,21 +431,165 @@ function normalize_record($row, $includePayload)
         $animalCount = 1;
     }
 
+    $localImagePath = strval(isset($row['local_image_path']) ? $row['local_image_path'] : '');
+    $mediaUrl = $localImagePath !== '' ? $mediaEndpoint : '';
+
     $common['details'] = array(
         'payload_size' => intval(isset($row['image_byte_length']) ? $row['image_byte_length'] : 0),
         'tid' => intval(isset($row['track_id']) ? $row['track_id'] : (isset($normalized['track_id']) ? $normalized['track_id'] : 0)),
+        'face_id' => intval(isset($row['face_id']) ? $row['face_id'] : (isset($normalized['face_id']) ? $normalized['face_id'] : (isset($row['track_id']) ? $row['track_id'] : 0))),
         'image_hex_preview' => compact_hex(isset($row['raw_protocol_hex']) ? $row['raw_protocol_hex'] : '', 180),
         'base64_image' => $imageDataUrl,
         'image_data_url' => $imageDataUrl,
-        'frame_image_url' => strval(isset($row['frame_image_url']) ? $row['frame_image_url'] : ''),
+        'frame_image_url' => $mediaUrl,
         'image_fetch_status' => strval(isset($row['image_fetch_status']) ? $row['image_fetch_status'] : ''),
-        'local_image_path' => strval(isset($row['local_image_path']) ? $row['local_image_path'] : ''),
+        'local_image_path' => $localImagePath,
+        'media_kind' => strval(isset($row['media_kind']) ? $row['media_kind'] : $mediaKind),
+        'media_url' => $mediaUrl,
+        'payload_type' => intval(isset($normalized['payload_type']) ? $normalized['payload_type'] : (isset($row['media_type']) ? $row['media_type'] : 0)),
+        'media_type' => intval(isset($row['media_type']) ? $row['media_type'] : (isset($normalized['payload_type']) ? $normalized['payload_type'] : 0)),
+        'start_timestamp' => intval(isset($row['start_timestamp_ms']) ? $row['start_timestamp_ms'] : (isset($normalized['start_timestamp']) ? $normalized['start_timestamp'] : 0)),
+        'end_timestamp' => intval(isset($row['end_timestamp_ms']) ? $row['end_timestamp_ms'] : (isset($normalized['end_timestamp']) ? $normalized['end_timestamp'] : 0)),
+        'total_packets' => intval(isset($row['total_packets']) ? $row['total_packets'] : (isset($normalized['total_packets']) ? $normalized['total_packets'] : 0)),
+        'packet_index' => intval(isset($row['packet_index']) ? $row['packet_index'] : (isset($normalized['packet_index']) ? $normalized['packet_index'] : 0)),
+        'received_packets' => intval(isset($row['received_packets']) ? $row['received_packets'] : (isset($normalized['received_packets']) ? $normalized['received_packets'] : 0)),
+        'media_total_size' => intval(isset($row['media_total_size']) ? $row['media_total_size'] : (isset($normalized['media_total_size']) ? $normalized['media_total_size'] : 0)),
+        'chunk_length' => intval(isset($row['chunk_length']) ? $row['chunk_length'] : (isset($normalized['chunk_length']) ? $normalized['chunk_length'] : 0)),
+        'received_media_size' => intval(isset($row['received_media_size']) ? $row['received_media_size'] : (isset($normalized['received_media_size']) ? $normalized['received_media_size'] : 0)),
+        'is_complete_media' => intval(isset($row['is_complete_media']) ? $row['is_complete_media'] : (!empty($normalized['is_complete_media']) ? 1 : 0)) === 1,
+        'source_file_name' => strval(isset($normalized['source_file_name']) ? $normalized['source_file_name'] : ''),
         'error_message' => strval(isset($row['error_message']) ? $row['error_message'] : ''),
         'person_count' => intval(isset($row['person_count']) ? $row['person_count'] : 0),
         'animal_count' => max(0, $animalCount),
         'car_count' => intval(isset($row['car_count']) ? $row['car_count'] : 0)
     );
     return $common;
+}
+
+function media_content_type_from_path($path)
+{
+    $ext = strtolower(pathinfo(strval($path), PATHINFO_EXTENSION));
+    if ($ext === 'mp4') return 'video/mp4';
+    if ($ext === 'jpg' || $ext === 'jpeg') return 'image/jpeg';
+    if ($ext === 'png') return 'image/png';
+    if ($ext === 'bin') return 'application/octet-stream';
+    return 'application/octet-stream';
+}
+
+function resolve_media_file_path($path)
+{
+    $text = trim(strval($path));
+    if ($text === '') {
+        return null;
+    }
+
+    $normalized = ltrim(str_replace('\\', '/', $text), '/');
+    $projectRoot = dirname(__DIR__, 4);
+    $phpRoot = dirname(__DIR__, 3);
+
+    $candidates = array(
+        $text,
+        $projectRoot . '/' . $normalized,
+        $phpRoot . '/' . $normalized
+    );
+    if (strpos($normalized, 'charging-aiot-php/') === 0) {
+        $candidates[] = $projectRoot . '/' . substr($normalized, strlen('charging-aiot-php/'));
+    }
+
+    foreach (array_values(array_unique($candidates)) as $candidate) {
+        if (is_file($candidate) && is_readable($candidate)) {
+            return $candidate;
+        }
+    }
+
+    return null;
+}
+
+function stream_file_with_range($filePath, $contentType)
+{
+    $size = filesize($filePath);
+    if ($size === false) {
+        throw new RuntimeException('failed to read media file size');
+    }
+
+    $start = 0;
+    $end = $size - 1;
+    $statusCode = 200;
+
+    if (isset($_SERVER['HTTP_RANGE']) && preg_match('/bytes=(\d*)-(\d*)/i', strval($_SERVER['HTTP_RANGE']), $matches) === 1) {
+        $rangeStart = $matches[1];
+        $rangeEnd = $matches[2];
+
+        if ($rangeStart === '' && $rangeEnd === '') {
+            respond_error('invalid range', 416);
+        }
+
+        if ($rangeStart === '') {
+            $suffixLength = intval($rangeEnd);
+            if ($suffixLength > 0) {
+                $start = max(0, $size - $suffixLength);
+            }
+        } else {
+            $start = intval($rangeStart);
+        }
+
+        if ($rangeEnd !== '') {
+            $end = intval($rangeEnd);
+        }
+
+        if ($start > $end || $start >= $size) {
+            header('Content-Range: bytes */' . $size);
+            respond_error('requested range not satisfiable', 416);
+        }
+
+        $end = min($end, $size - 1);
+        $statusCode = 206;
+    }
+
+    $length = $end - $start + 1;
+    if (ob_get_level() > 0) {
+        @ob_end_clean();
+    }
+
+    http_response_code($statusCode);
+    header('Content-Type: ' . $contentType);
+    header('Accept-Ranges: bytes');
+    header('Content-Length: ' . $length);
+    header('Cache-Control: public, max-age=86400');
+    header('Content-Disposition: inline; filename="' . basename($filePath) . '"');
+    if ($statusCode === 206) {
+        header('Content-Range: bytes ' . $start . '-' . $end . '/' . $size);
+    }
+
+    if (strtoupper(isset($_SERVER['REQUEST_METHOD']) ? $_SERVER['REQUEST_METHOD'] : 'GET') === 'HEAD') {
+        exit;
+    }
+
+    $fp = fopen($filePath, 'rb');
+    if ($fp === false) {
+        throw new RuntimeException('failed to open media file');
+    }
+
+    try {
+        fseek($fp, $start);
+        $remaining = $length;
+        while ($remaining > 0 && !feof($fp)) {
+            $chunkSize = $remaining > 8192 ? 8192 : $remaining;
+            $buffer = fread($fp, $chunkSize);
+            if ($buffer === false) {
+                break;
+            }
+            echo $buffer;
+            flush();
+            $remaining -= strlen($buffer);
+            if (connection_aborted()) {
+                break;
+            }
+        }
+    } finally {
+        fclose($fp);
+    }
+    exit;
 }
 
 function build_linked_packets($records)
@@ -746,9 +925,111 @@ function query_frame_hex(PDO $pdo, $protocol, $recordId)
     );
 }
 
+function query_media_row(PDO $pdo, $protocol, $recordId)
+{
+    $pid = intval($protocol);
+    if ($pid !== 103) {
+        throw new InvalidArgumentException('media stream currently supports protocol 103 only');
+    }
+
+    $id = intval($recordId);
+    if ($id <= 0) {
+        throw new InvalidArgumentException('record_id must be positive');
+    }
+
+    $table = 'message_103_records';
+    if (!table_exists($pdo, $table)) {
+        throw new RuntimeException('table not found: ' . $table);
+    }
+
+    $stmt = $pdo->prepare('SELECT id, local_image_path, normalized_json FROM message_103_records WHERE id = ? LIMIT 1');
+    $stmt->execute(array($id));
+    $row = $stmt->fetch(PDO::FETCH_ASSOC);
+    if (!$row) {
+        throw new RuntimeException('record not found');
+    }
+
+    return $row;
+}
+
+function handle_stream_media(PDO $pdo, $protocol, $recordId)
+{
+    $method = strtoupper(isset($_SERVER['REQUEST_METHOD']) ? $_SERVER['REQUEST_METHOD'] : 'GET');
+    if ($method !== 'GET' && $method !== 'HEAD') {
+        respond_error('Only GET/HEAD method is supported', 405);
+    }
+
+    $row = query_media_row($pdo, $protocol, $recordId);
+    $localPath = strval(isset($row['local_image_path']) ? $row['local_image_path'] : '');
+    $normalized = json_decode_array(isset($row['normalized_json']) ? $row['normalized_json'] : '');
+    if ($localPath === '' && isset($normalized['local_image_path'])) {
+        $localPath = strval($normalized['local_image_path']);
+    }
+
+    $realPath = resolve_media_file_path($localPath);
+    if ($realPath === null) {
+        throw new RuntimeException('media file not found');
+    }
+
+    $download = isset($_GET['download']) ? intval($_GET['download']) : 0;
+    if ($download === 1) {
+        header('Content-Disposition: attachment; filename="' . basename($realPath) . '"');
+    }
+
+    stream_file_with_range($realPath, media_content_type_from_path($realPath));
+}
+
+function handle_delete_media(PDO $pdo, $protocol, $recordId)
+{
+    $method = strtoupper(isset($_SERVER['REQUEST_METHOD']) ? $_SERVER['REQUEST_METHOD'] : 'GET');
+    if ($method !== 'DELETE' && $method !== 'POST') {
+        respond_error('Only DELETE/POST method is supported', 405);
+    }
+
+    $row = query_media_row($pdo, $protocol, $recordId);
+    $localPath = strval(isset($row['local_image_path']) ? $row['local_image_path'] : '');
+    $normalized = json_decode_array(isset($row['normalized_json']) ? $row['normalized_json'] : '');
+    if ($localPath === '' && isset($normalized['local_image_path'])) {
+        $localPath = strval($normalized['local_image_path']);
+    }
+
+    $realPath = resolve_media_file_path($localPath);
+    $deleted = false;
+    if ($realPath !== null && is_file($realPath)) {
+        $deleted = @unlink($realPath);
+        if (!$deleted) {
+            respond_error('failed to delete media file', 500);
+        }
+    }
+
+    $normalized['local_image_path'] = '';
+    $normalized['media_deleted_at'] = date('Y-m-d H:i:s');
+    $normalized['media_deleted_flag'] = 1;
+
+    $stmt = $pdo->prepare('UPDATE message_103_records SET local_image_path = NULL, image_fetch_status = ?, error_message = ?, normalized_json = ? WHERE id = ? LIMIT 1');
+    $stmt->execute(array(
+        'deleted',
+        'media file deleted manually',
+        json_encode($normalized, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
+        intval($row['id'])
+    ));
+
+    respond_success(array(
+        'record_id' => intval($row['id']),
+        'deleted' => $deleted || $realPath === null,
+        'path' => $localPath
+    ), 'deleted');
+}
+
 function handle_upload_stream_records_request($pdo)
 {
     try {
+        if (isset($_GET['action']) && strval($_GET['action']) === 'media') {
+            handle_stream_media($pdo, isset($_GET['protocol']) ? $_GET['protocol'] : null, isset($_GET['record_id']) ? $_GET['record_id'] : null);
+        }
+        if (isset($_GET['action']) && strval($_GET['action']) === 'delete_media') {
+            handle_delete_media($pdo, isset($_GET['protocol']) ? $_GET['protocol'] : null, isset($_GET['record_id']) ? $_GET['record_id'] : null);
+        }
         if (isset($_GET['action']) && strval($_GET['action']) === 'frame') {
             respond_success(query_frame_hex($pdo, isset($_GET['protocol']) ? $_GET['protocol'] : null, isset($_GET['record_id']) ? $_GET['record_id'] : null), 'ok');
         }

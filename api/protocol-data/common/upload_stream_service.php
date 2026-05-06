@@ -122,6 +122,11 @@ class StreamFrameVO
     public $frameTail;
     public $payloadType;
     public $trackId;
+    public $faceId;
+    public $totalPackets;
+    public $packetIndex;
+    public $mediaTotalSize;
+    public $chunkLength;
     public $startTimestamp;
     public $endTimestamp;
 
@@ -144,6 +149,11 @@ class StreamFrameVO
         $this->frameTail = isset($meta['frame_tail']) ? intval($meta['frame_tail']) : 0xFFFFFFFF;
         $this->payloadType = isset($meta['payload_type']) ? intval($meta['payload_type']) : 0;
         $this->trackId = isset($meta['track_id']) ? intval($meta['track_id']) : 0;
+        $this->faceId = isset($meta['face_id']) ? intval($meta['face_id']) : $this->trackId;
+        $this->totalPackets = isset($meta['total_packets']) ? intval($meta['total_packets']) : $count;
+        $this->packetIndex = isset($meta['packet_index']) ? intval($meta['packet_index']) : 0;
+        $this->mediaTotalSize = isset($meta['media_total_size']) ? intval($meta['media_total_size']) : 0;
+        $this->chunkLength = isset($meta['chunk_length']) ? intval($meta['chunk_length']) : 0;
         $this->startTimestamp = isset($meta['start_timestamp']) ? intval($meta['start_timestamp']) : 0;
         $this->endTimestamp = isset($meta['end_timestamp']) ? intval($meta['end_timestamp']) : 0;
     }
@@ -168,6 +178,11 @@ class StreamFrameVO
             $data['count'] = $this->count;
             $data['payload_type'] = $this->payloadType;
             $data['track_id'] = $this->trackId;
+            $data['face_id'] = $this->faceId;
+            $data['total_packets'] = $this->totalPackets;
+            $data['packet_index'] = $this->packetIndex;
+            $data['media_total_size'] = $this->mediaTotalSize;
+            $data['chunk_length'] = $this->chunkLength;
             $data['start_timestamp'] = $this->startTimestamp;
             $data['end_timestamp'] = $this->endTimestamp;
         } else {
@@ -238,6 +253,57 @@ function byte_at($data, $offset)
     return ord($data[$offset]);
 }
 
+function build_upload_response_data($requestDTO, $parseResult, $storedFile = null)
+{
+    $protocol = intval(isset($requestDTO->protocol) ? $requestDTO->protocol : 0);
+    $data = array(
+        'protocol' => $protocol,
+        'cam_id' => intval(isset($parseResult->camId) ? $parseResult->camId : 0),
+        'frame_count' => intval(isset($parseResult->frameCount) ? $parseResult->frameCount : 0)
+    );
+
+    if (is_array($storedFile)) {
+        $data['stored_file'] = isset($storedFile['relative_path']) ? $storedFile['relative_path'] : '';
+        $data['stored_file_size'] = isset($storedFile['size']) ? intval($storedFile['size']) : 0;
+    }
+
+    if ($protocol === 103 && isset($parseResult->frames) && is_array($parseResult->frames) && !empty($parseResult->frames)) {
+        $frames = $parseResult->frames;
+        $firstFrame = $frames[0];
+        $filenameMeta = parse_103_filename_meta(isset($requestDTO->filename) ? $requestDTO->filename : '');
+        $trackId = intval(isset($firstFrame->trackId) ? $firstFrame->trackId : 0);
+        if ($filenameMeta && intval($filenameMeta['track_id']) > 0) {
+            $trackId = intval($filenameMeta['track_id']);
+        }
+
+        $startTimestampMs = $filenameMeta ? intval($filenameMeta['start_timestamp_ms']) : intval(isset($firstFrame->timestamp) ? $firstFrame->timestamp : 0);
+        $lastFrame = $frames[count($frames) - 1];
+        $endTimestampMs = $filenameMeta ? intval($filenameMeta['end_timestamp_ms']) : intval(isset($lastFrame->timestamp) ? $lastFrame->timestamp : 0);
+        $payloadType = intval(isset($firstFrame->payloadType) ? $firstFrame->payloadType : 0);
+        $mediaKind = $payloadType === 1 ? 'image' : ($payloadType === 2 ? 'video' : 'binary');
+
+        $data['summary'] = array(
+            'payload_type' => $payloadType,
+            'media_kind' => $mediaKind,
+            'track_id' => $trackId,
+            'start_timestamp' => $startTimestampMs,
+            'end_timestamp' => $endTimestampMs,
+            'total_packets' => count($frames),
+            'source_file_name' => isset($requestDTO->filename) ? strval($requestDTO->filename) : '',
+            'source_file_size' => isset($requestDTO->fileSize) ? intval($requestDTO->fileSize) : 0
+        );
+        return $data;
+    }
+
+    $data['frames'] = array();
+    if (isset($parseResult->frames) && is_array($parseResult->frames)) {
+        foreach ($parseResult->frames as $frameVO) {
+            $data['frames'][] = $frameVO->toArray();
+        }
+    }
+    return $data;
+}
+
 function request_uri()
 {
     return isset($_SERVER['REQUEST_URI']) ? (string) $_SERVER['REQUEST_URI'] : '';
@@ -285,12 +351,25 @@ function read_u16_le($data, $offset)
     return byte_at($data, $offset) | (byte_at($data, $offset + 1) << 8);
 }
 
+function read_u16_be($data, $offset)
+{
+    return (byte_at($data, $offset) << 8) | byte_at($data, $offset + 1);
+}
+
 function read_u32_le($data, $offset)
 {
     return byte_at($data, $offset)
         | (byte_at($data, $offset + 1) << 8)
         | (byte_at($data, $offset + 2) << 16)
         | (byte_at($data, $offset + 3) << 24);
+}
+
+function read_u32_be($data, $offset)
+{
+    return (byte_at($data, $offset) << 24)
+        | (byte_at($data, $offset + 1) << 16)
+        | (byte_at($data, $offset + 2) << 8)
+        | byte_at($data, $offset + 3);
 }
 
 function read_u64_le($data, $offset)
@@ -325,6 +404,19 @@ function read_f32_le($data, $offset)
         throw new RuntimeException('binary float offset out of range: ' . $offset);
     }
     $arr = unpack('gvalue', $chunk);
+    if (!is_array($arr) || !array_key_exists('value', $arr)) {
+        throw new RuntimeException('failed to unpack float at offset ' . $offset);
+    }
+    return floatval($arr['value']);
+}
+
+function read_f32_be($data, $offset)
+{
+    $chunk = substr($data, $offset, 4);
+    if ($chunk === false || strlen($chunk) !== 4) {
+        throw new RuntimeException('binary float offset out of range: ' . $offset);
+    }
+    $arr = unpack('Gvalue', $chunk);
     if (!is_array($arr) || !array_key_exists('value', $arr)) {
         throw new RuntimeException('failed to unpack float at offset ' . $offset);
     }
@@ -631,6 +723,15 @@ function ensure_protocol_meta_columns($pdo, $tableName)
     }
 }
 
+function ensure_message_columns($pdo, $tableName, $columns)
+{
+    foreach ($columns as $columnName => $definition) {
+        if (!message_column_exists($pdo, $tableName, $columnName)) {
+            $pdo->exec('ALTER TABLE ' . $tableName . ' ADD COLUMN ' . $columnName . ' ' . $definition);
+        }
+    }
+}
+
 function ensure_message_table_exists($pdo, $protocol)
 {
     $tableName = 'message_' . intval($protocol) . '_records';
@@ -638,6 +739,34 @@ function ensure_message_table_exists($pdo, $protocol)
         throw new RuntimeException('table not found: ' . $tableName);
     }
     ensure_protocol_meta_columns($pdo, $tableName);
+    if (intval($protocol) === 101) {
+        ensure_message_columns($pdo, $tableName, array(
+            'face_id' => 'BIGINT DEFAULT NULL AFTER track_id',
+            'frame_face_count' => 'INT DEFAULT NULL AFTER obj_type',
+            'frame_width' => 'INT DEFAULT NULL AFTER frame_face_count',
+            'frame_height' => 'INT DEFAULT NULL AFTER frame_width',
+            'reserved_value' => 'INT DEFAULT NULL AFTER frame_height'
+        ));
+    } elseif (intval($protocol) === 102) {
+        ensure_message_columns($pdo, $tableName, array(
+            'face_id' => 'BIGINT DEFAULT NULL AFTER track_id'
+        ));
+    } elseif (intval($protocol) === 103) {
+        ensure_message_columns($pdo, $tableName, array(
+            'face_id' => 'BIGINT DEFAULT NULL AFTER track_id',
+            'media_type' => 'INT DEFAULT NULL AFTER obj_type',
+            'total_packets' => 'INT DEFAULT 0 AFTER media_type',
+            'packet_index' => 'INT DEFAULT 0 AFTER total_packets',
+            'media_total_size' => 'BIGINT DEFAULT 0 AFTER packet_index',
+            'chunk_length' => 'BIGINT DEFAULT 0 AFTER media_total_size',
+            'received_packets' => 'INT DEFAULT 0 AFTER chunk_length',
+            'received_media_size' => 'BIGINT DEFAULT 0 AFTER received_packets',
+            'is_complete_media' => 'TINYINT(1) DEFAULT 0 AFTER received_media_size',
+            'media_kind' => 'VARCHAR(32) DEFAULT NULL AFTER is_complete_media',
+            'start_timestamp_ms' => 'BIGINT DEFAULT NULL AFTER media_kind',
+            'end_timestamp_ms' => 'BIGINT DEFAULT NULL AFTER start_timestamp_ms'
+        ));
+    }
     return $tableName;
 }
 
@@ -780,13 +909,67 @@ function store_protocol_payload_file($relativeDir, $filename, $binary)
     return 'charging-aiot-php/storage/' . trim($relativeDir, '/') . '/' . $filename;
 }
 
+function normalize_maybe_ms_timestamp($value)
+{
+    $ts = intval($value);
+    if ($ts <= 0) return 0;
+    if ($ts < 100000000000) {
+        return $ts * 1000;
+    }
+    return $ts;
+}
+
+function parse_103_filename_meta($filename)
+{
+    $name = basename(strval($filename));
+    if (preg_match('/^(\d+)_(\d{10,13})_(\d{10,13})\.[A-Za-z0-9]+$/', $name, $matches) !== 1) {
+        return null;
+    }
+
+    return array(
+        'track_id' => intval($matches[1]),
+        'start_timestamp_ms' => normalize_maybe_ms_timestamp($matches[2]),
+        'end_timestamp_ms' => normalize_maybe_ms_timestamp($matches[3]),
+        'source_file_name' => $name
+    );
+}
+
+function build_public_media_url($relativePath)
+{
+    $path = trim(strval($relativePath));
+    if ($path === '') return '';
+    if (preg_match('#^https?://#i', $path) === 1) return $path;
+    return '/' . ltrim($path, '/');
+}
+
+function store_protocol_media_in_project_file($protocol, $eventTimestamp, $cameraCode, $trackId, $startTimestampMs, $endTimestampMs, $mediaBinary, $extension)
+{
+    $dateYmd = date('Ymd', intval($eventTimestamp / 1000));
+    $subDir = 'image';
+    $dir = ensure_project_file_dir($dateYmd, $protocol, $cameraCode, $subDir);
+    $filename = sprintf(
+        '%s_t%d_%s_%s.%s',
+        $cameraCode,
+        intval($trackId),
+        intval($startTimestampMs),
+        intval($endTimestampMs),
+        ltrim($extension, '.')
+    );
+    $path = $dir . '/' . $filename;
+    $bytes = @file_put_contents($path, is_string($mediaBinary) ? $mediaBinary : '', LOCK_EX);
+    if ($bytes === false) {
+        throw new RuntimeException('failed to write media file: ' . $path);
+    }
+    return build_project_file_relative_path($dateYmd, $protocol, $cameraCode, $filename, $subDir);
+}
+
 function encode_json_text($payload)
 {
     $json = json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
     return $json === false ? '{}' : $json;
 }
 
-function save_parsed_frames($pdo, $parseResult)
+function save_parsed_frames($pdo, $parseResult, $requestDTO = null)
 {
     $protocol = intval($parseResult->protocol);
     $tableName = ensure_message_table_exists($pdo, $protocol);
@@ -795,25 +978,28 @@ function save_parsed_frames($pdo, $parseResult)
 
     $insert101Stmt = $pdo->prepare(
         'INSERT INTO message_101_records (
-            batch_id, camera_id, event_timestamp_ms, track_id, obj_type, x1, y1, x2, y2, conf, object_index,
+            batch_id, camera_id, event_timestamp_ms, track_id, face_id, obj_type, frame_face_count, frame_width,
+            frame_height, reserved_value, x1, y1, x2, y2, conf, object_index,
             protocol_version, frame_header, frame_tail, crc_value, frame_length, raw_protocol_hex, normalized_json
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
     );
 
     $insert102Stmt = $pdo->prepare(
         'INSERT INTO message_102_records (
-            batch_id, camera_id, event_timestamp_ms, track_id, obj_type, information, person_name, status_text,
+            batch_id, camera_id, event_timestamp_ms, track_id, face_id, obj_type, information, person_name, status_text,
             feature_data, vector_index, embedding_dim, embedding_byte_length, embedding_file_path, embedding_preview,
             protocol_version, frame_header, frame_tail, crc_value, frame_length, raw_protocol_hex, normalized_json
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
     );
 
     $insert103Stmt = $pdo->prepare(
         'INSERT INTO message_103_records (
-            batch_id, camera_id, event_timestamp_ms, track_id, obj_type, person_count, car_count, frame_image_url,
+            batch_id, camera_id, event_timestamp_ms, track_id, face_id, obj_type, media_type, total_packets,
+            packet_index, media_total_size, chunk_length, received_packets, received_media_size, is_complete_media,
+            media_kind, start_timestamp_ms, end_timestamp_ms, person_count, car_count, frame_image_url,
             image_fetch_status, local_image_path, image_index, image_byte_length, protocol_version, frame_header,
             frame_tail, crc_value, frame_length, raw_protocol_hex, image_downloaded_at, error_message, normalized_json
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
     );
 
     $wsEvents = array();
@@ -840,16 +1026,26 @@ function save_parsed_frames($pdo, $parseResult)
                         'frame_seq' => intval($frameVO->frameSeq),
                         'frame_index' => intval($frameIndex),
                         'frame_target_count' => intval($frameVO->count),
+                        'frame_face_count' => intval($frameVO->count),
+                        'frame_width' => intval(isset($frameVO->frameMeta['frame_width']) ? $frameVO->frameMeta['frame_width'] : 0),
+                        'frame_height' => intval(isset($frameVO->frameMeta['frame_height']) ? $frameVO->frameMeta['frame_height'] : 0),
+                        'reserved_value' => intval(isset($frameVO->frameMeta['reserved']) ? $frameVO->frameMeta['reserved'] : 0),
                         'frame_file_path' => $frameFilePath,
                         'objects' => $targets
                     ));
 
+                    $faceId = intval(isset($target['tid']) ? $target['tid'] : 0);
                     $insert101Stmt->execute(array(
                         $batchId,
                         $cameraCode,
                         $eventTimestamp,
-                        intval(isset($target['tid']) ? $target['tid'] : 0),
+                        $faceId,
+                        $faceId,
                         intval(isset($target['type']) ? $target['type'] : 0),
+                        intval($frameVO->count),
+                        intval(isset($frameVO->frameMeta['frame_width']) ? $frameVO->frameMeta['frame_width'] : 0),
+                        intval(isset($frameVO->frameMeta['frame_height']) ? $frameVO->frameMeta['frame_height'] : 0),
+                        intval(isset($frameVO->frameMeta['reserved']) ? $frameVO->frameMeta['reserved'] : 0),
                         intval(isset($target['x1']) ? $target['x1'] : 0),
                         intval(isset($target['y1']) ? $target['y1'] : 0),
                         intval(isset($target['x2']) ? $target['x2'] : 0),
@@ -873,13 +1069,21 @@ function save_parsed_frames($pdo, $parseResult)
                         'protocol_id' => 101,
                         'timestamp' => $eventTimestamp,
                         'create_time' => $createdAt,
+                        'track_id' => $faceId,
+                        'face_id' => $faceId,
                         'batch_id' => $batchId,
                         'details' => array(
                             'count' => 1,
+                            'target_count' => 1,
                             'frame_seq' => intval($frameVO->frameSeq),
+                            'frame_face_count' => intval($frameVO->count),
+                            'frame_width' => intval(isset($frameVO->frameMeta['frame_width']) ? $frameVO->frameMeta['frame_width'] : 0),
+                            'frame_height' => intval(isset($frameVO->frameMeta['frame_height']) ? $frameVO->frameMeta['frame_height'] : 0),
+                            'reserved_value' => intval(isset($frameVO->frameMeta['reserved']) ? $frameVO->frameMeta['reserved'] : 0),
                             'targets' => array(array(
                                 'type' => intval(isset($target['type']) ? $target['type'] : 0),
-                                'tid' => intval(isset($target['tid']) ? $target['tid'] : 0),
+                                'tid' => $faceId,
+                                'face_id' => $faceId,
                                 'x1' => intval(isset($target['x1']) ? $target['x1'] : 0),
                                 'y1' => intval(isset($target['y1']) ? $target['y1'] : 0),
                                 'x2' => intval(isset($target['x2']) ? $target['x2'] : 0),
@@ -922,15 +1126,18 @@ function save_parsed_frames($pdo, $parseResult)
                         'embedding_byte_length_each' => strlen($vectorBinary),
                         'obj_type' => intval(isset($item['type']) ? $item['type'] : 0),
                         'track_id' => intval(isset($item['tid']) ? $item['tid'] : 0),
+                        'face_id' => intval(isset($item['tid']) ? $item['tid'] : 0),
                         'vector_index' => intval($itemIndex),
                         'embedding_file_path' => $vectorPath
                     ));
 
+                    $faceId = intval(isset($item['tid']) ? $item['tid'] : 0);
                     $insert102Stmt->execute(array(
                         $batchId,
                         $cameraCode,
                         $eventTimestamp,
-                        intval(isset($item['tid']) ? $item['tid'] : 0),
+                        $faceId,
+                        $faceId,
                         intval(isset($item['type']) ? $item['type'] : 0),
                         'received',
                         null,
@@ -958,12 +1165,15 @@ function save_parsed_frames($pdo, $parseResult)
                         'protocol_id' => 102,
                         'timestamp' => $eventTimestamp,
                         'create_time' => $createdAt,
+                        'track_id' => $faceId,
+                        'face_id' => $faceId,
                         'batch_id' => $batchId,
                         'details' => array(
                             'frame_seq' => intval($frameVO->frameSeq),
                             'count' => intval($frameVO->count),
                             'obj_type' => intval(isset($item['type']) ? $item['type'] : 0),
-                            'tid' => intval(isset($item['tid']) ? $item['tid'] : 0),
+                            'tid' => $faceId,
+                            'face_id' => $faceId,
                             'payload_size' => strlen($vectorBinary),
                             'vector_base64_preview' => substr($vectorBase64, 0, 96),
                             'vector_hex_preview' => bin2hex(substr($vectorBinary, 0, 32)),
@@ -983,48 +1193,124 @@ function save_parsed_frames($pdo, $parseResult)
             }
 
             if ($protocol === 103) {
-                $payloadBinary = is_string($frameVO->payloadBinary) ? $frameVO->payloadBinary : '';
-                $payloadFilePath = store_protocol_payload_in_project_file(103, $eventTimestamp, $cameraCode, $frameIndex, $payloadBinary, 'bin');
-                $isJpegPayload = intval($frameVO->payloadType) === 1;
-                $imagePath = $isJpegPayload
-                    ? store_protocol_payload_in_project_file(103, $eventTimestamp, $cameraCode, $frameIndex, $payloadBinary, 'jpg')
-                    : null;
+                $frames103 = $parseResult->frames;
+                $filenameMeta = parse_103_filename_meta($requestDTO ? $requestDTO->filename : '');
+                $firstFrame = $frames103[0];
+                $payloadType = intval($firstFrame->payloadType);
+                $faceId = intval($firstFrame->trackId);
+                $declaredTotalPackets = intval($firstFrame->count);
+                if ($filenameMeta && intval($filenameMeta['track_id']) > 0) {
+                    $faceId = intval($filenameMeta['track_id']);
+                }
+
+                $sortedFrames = $frames103;
+                usort($sortedFrames, function ($a, $b) {
+                    if (intval($a->endTimestamp) === intval($b->endTimestamp)) {
+                        return intval($a->frameSeq) - intval($b->frameSeq);
+                    }
+                    return intval($a->endTimestamp) - intval($b->endTimestamp);
+                });
+
+                $mediaBinary = '';
+                $mediaTotalSize = 0;
+                $lastPacketIndex = 0;
+                $lastChunkLength = 0;
+                foreach ($sortedFrames as $sortedIndex => $sortedFrame) {
+                    $payloadChunk = is_string($sortedFrame->payloadBinary) ? $sortedFrame->payloadBinary : '';
+                    $mediaBinary .= $payloadChunk;
+                    store_protocol_frame_binary(103, intval($sortedFrame->timestamp), $cameraCode, $sortedIndex, $sortedFrame->rawFrameBinary);
+                    store_protocol_payload_in_project_file(103, intval($sortedFrame->timestamp), $cameraCode, $sortedIndex, $payloadChunk, 'bin');
+                    if (intval(isset($sortedFrame->mediaTotalSize) ? $sortedFrame->mediaTotalSize : 0) > 0) {
+                        $mediaTotalSize = intval($sortedFrame->mediaTotalSize);
+                    } elseif (isset($sortedFrame->payloadItems['media_total_size'])) {
+                        $mediaTotalSize = intval($sortedFrame->payloadItems['media_total_size']);
+                    }
+                    if (intval(isset($sortedFrame->packetIndex) ? $sortedFrame->packetIndex : 0) > 0) {
+                        $lastPacketIndex = intval($sortedFrame->packetIndex);
+                    } elseif (intval(isset($sortedFrame->endTimestamp) ? $sortedFrame->endTimestamp : 0) > 0) {
+                        $lastPacketIndex = intval($sortedFrame->endTimestamp);
+                    }
+                    if (intval(isset($sortedFrame->chunkLength) ? $sortedFrame->chunkLength : 0) > 0) {
+                        $lastChunkLength = intval($sortedFrame->chunkLength);
+                    } elseif (isset($sortedFrame->payloadItems['chunk_length'])) {
+                        $lastChunkLength = intval($sortedFrame->payloadItems['chunk_length']);
+                    }
+                }
+
+                $startTimestampMs = $filenameMeta ? intval($filenameMeta['start_timestamp_ms']) : intval($firstFrame->timestamp);
+                $endTimestampMs = $filenameMeta ? intval($filenameMeta['end_timestamp_ms']) : intval($sortedFrames[count($sortedFrames) - 1]->timestamp);
+                $eventTimestamp = $startTimestampMs > 0 ? $startTimestampMs : intval($firstFrame->timestamp);
+                $isJpegPayload = $payloadType === 1;
+                $mediaKind = $isJpegPayload ? 'image' : ($payloadType === 2 ? 'video' : 'binary');
+                $mediaExt = $isJpegPayload ? 'jpg' : ($payloadType === 2 ? 'mp4' : 'bin');
+                $mediaPath = store_protocol_media_in_project_file(103, $eventTimestamp, $cameraCode, $faceId, $startTimestampMs, $endTimestampMs, $mediaBinary, $mediaExt);
+                $receivedPackets = count($sortedFrames);
+                $receivedBytes = strlen($mediaBinary);
+                $packetComplete = $declaredTotalPackets > 0 && $receivedPackets === $declaredTotalPackets;
+                $byteComplete = $mediaTotalSize > 0 && $receivedBytes === $mediaTotalSize;
+                $isCompleteMedia = $packetComplete && $byteComplete;
+                $publicMediaUrl = build_public_media_url($mediaPath);
+                $statusText = $mediaKind === 'binary' ? 'binary_only' : ($isCompleteMedia ? 'success' : 'incomplete');
+                $rawProtocolHex = build_raw_protocol_hex(is_string($requestDTO ? $requestDTO->binaryData : '') ? $requestDTO->binaryData : $firstFrame->rawFrameBinary);
+
                 $normalizedJson = encode_json_text(array(
                     'protocol' => 103,
                     'camera_id' => $cameraCode,
-                    'cam_id' => intval($frameVO->camId),
+                    'cam_id' => intval($firstFrame->camId),
                     'timestamp' => $eventTimestamp,
-                    'frame_seq' => intval($frameVO->frameSeq),
-                    'frame_target_count' => intval($frameVO->count),
-                    'frame_index' => intval($frameIndex),
-                    'payload_type' => intval($frameVO->payloadType),
-                    'track_id' => intval($frameVO->trackId),
-                    'total_packets' => intval($frameVO->startTimestamp),
-                    'packet_index' => intval($frameVO->endTimestamp),
-                    'frame_file_path' => $frameFilePath,
-                    'payload_file_path' => $payloadFilePath,
-                    'local_image_path' => $imagePath,
-                    'image_byte_length' => strlen($payloadBinary)
+                    'frame_seq' => 1,
+                    'frame_target_count' => 1,
+                    'frame_index' => 0,
+                    'payload_type' => $payloadType,
+                    'track_id' => $faceId,
+                    'face_id' => $faceId,
+                    'start_timestamp' => $startTimestampMs,
+                    'end_timestamp' => $endTimestampMs,
+                    'total_packets' => $declaredTotalPackets,
+                    'received_packets' => $receivedPackets,
+                    'packet_index' => $lastPacketIndex,
+                    'local_image_path' => $mediaPath,
+                    'image_byte_length' => $receivedBytes,
+                    'media_total_size' => $mediaTotalSize,
+                    'received_media_size' => $receivedBytes,
+                    'chunk_length' => $lastChunkLength,
+                    'is_complete_media' => $isCompleteMedia,
+                    'media_kind' => $mediaKind,
+                    'media_url' => $publicMediaUrl,
+                    'source_file_name' => $requestDTO ? strval($requestDTO->filename) : '',
+                    'source_file_size' => $requestDTO ? intval($requestDTO->fileSize) : strlen($mediaBinary)
                 ));
 
                 $insert103Stmt->execute(array(
                     $batchId,
                     $cameraCode,
                     $eventTimestamp,
-                    intval($frameVO->trackId),
+                    $faceId,
+                    $faceId,
                     null,
+                    $payloadType,
+                    $declaredTotalPackets,
+                    $lastPacketIndex,
+                    $mediaTotalSize,
+                    $lastChunkLength,
+                    $receivedPackets,
+                    $receivedBytes,
+                    $isCompleteMedia ? 1 : 0,
+                    $mediaKind,
+                    $startTimestampMs,
+                    $endTimestampMs,
                     0,
                     0,
-                    null,
-                    $isJpegPayload ? 'success' : 'binary_only',
-                    $imagePath,
-                    intval($frameIndex),
-                    strlen($payloadBinary),
-                    intval($frameVO->protocolVersion),
-                    intval($frameVO->frameHeader),
-                    intval($frameVO->frameTail),
-                    intval($frameVO->crc),
-                    intval($frameVO->frameLength),
+                    $publicMediaUrl,
+                    $statusText,
+                    $mediaPath,
+                    0,
+                    strlen($mediaBinary),
+                    intval($firstFrame->protocolVersion),
+                    intval($firstFrame->frameHeader),
+                    intval($firstFrame->frameTail),
+                    intval($firstFrame->crc),
+                    intval($requestDTO ? strlen($requestDTO->binaryData) : $firstFrame->frameLength),
                     $rawProtocolHex,
                     $createdAt,
                     null,
@@ -1032,34 +1318,47 @@ function save_parsed_frames($pdo, $parseResult)
                 ));
 
                 $recordId = intval($pdo->lastInsertId());
-                $base64Image = base64_encode($payloadBinary);
+                $base64Image = $isJpegPayload ? base64_encode($mediaBinary) : null;
                 $wsEvents[] = array(
                     'record_id' => $recordId,
-                    'cam_id' => intval($frameVO->camId),
+                    'cam_id' => intval($firstFrame->camId),
                     'camera_id' => $cameraCode,
                     'protocol_id' => 103,
                     'timestamp' => $eventTimestamp,
                     'create_time' => $createdAt,
                     'batch_id' => $batchId,
+                    'track_id' => $faceId,
+                    'face_id' => $faceId,
                     'details' => array(
-                        'frame_seq' => intval($frameVO->frameSeq),
-                        'count' => intval($frameVO->count),
-                        'payload_type' => intval($frameVO->payloadType),
-                        'tid' => intval($frameVO->trackId),
-                        'total_packets' => intval($frameVO->startTimestamp),
-                        'packet_index' => intval($frameVO->endTimestamp),
-                        'payload_size' => strlen($payloadBinary),
-                        'image_hex_preview' => bin2hex(substr($payloadBinary, 0, 64)),
-                        'base64_image' => $isJpegPayload ? $base64Image : null,
-                        'image_data_url' => $isJpegPayload ? ('data:image/jpeg;base64,' . $base64Image) : null,
-                        'image_fetch_status' => $isJpegPayload ? 'success' : 'binary_only',
-                        'frame_file_path' => $frameFilePath,
-                        'payload_file_path' => $payloadFilePath,
-                        'local_image_path' => $imagePath,
+                        'frame_seq' => 1,
+                        'count' => 1,
+                        'payload_type' => $payloadType,
+                        'tid' => $faceId,
+                        'face_id' => $faceId,
+                        'start_timestamp' => $startTimestampMs,
+                        'end_timestamp' => $endTimestampMs,
+                        'total_packets' => $declaredTotalPackets,
+                        'received_packets' => $receivedPackets,
+                        'packet_index' => $lastPacketIndex,
+                        'payload_size' => $receivedBytes,
+                        'media_type' => $payloadType,
+                        'media_total_size' => $mediaTotalSize,
+                        'chunk_length' => $lastChunkLength,
+                        'received_media_size' => $receivedBytes,
+                        'is_complete_media' => $isCompleteMedia,
+                        'image_hex_preview' => substr($rawProtocolHex, 0, 180),
+                        'base64_image' => $isJpegPayload ? $base64Image : '',
+                        'image_data_url' => $isJpegPayload ? ('data:image/jpeg;base64,' . $base64Image) : '',
+                        'image_fetch_status' => $statusText,
+                        'frame_image_url' => $publicMediaUrl,
+                        'local_image_path' => $mediaPath,
+                        'media_kind' => $mediaKind,
+                        'media_url' => $publicMediaUrl,
                         'person_count' => 0,
                         'car_count' => 0
                     )
                 );
+                break;
             }
         }
 
@@ -1103,11 +1402,7 @@ function parseBinaryStream($binaryData, $expectedProtocol, $expectedCamId)
             throw new RuntimeException('incomplete frame data at offset ' . $cursor);
         }
 
-        $camId = read_u32_le(strrev(substr($binaryData, $cursor + 6, 4)), 0);
-        $camId = (byte_at($binaryData, $cursor + 6) << 24)
-            | (byte_at($binaryData, $cursor + 7) << 16)
-            | (byte_at($binaryData, $cursor + 8) << 8)
-            | byte_at($binaryData, $cursor + 9);
+        $camId = read_u32_be($binaryData, $cursor + 6);
         $timestamp = (
             (byte_at($binaryData, $cursor + 10) << 24)
             | (byte_at($binaryData, $cursor + 11) << 16)
@@ -1157,10 +1452,10 @@ function parseBinaryStream($binaryData, $expectedProtocol, $expectedCamId)
                 throw new RuntimeException('protocol 101 payload size must be at least 8 bytes');
             }
 
-            $count = read_u16_le($binaryData, $payloadOffset);
-            $frameMeta['frame_width'] = read_u16_le($binaryData, $payloadOffset + 2);
-            $frameMeta['frame_height'] = read_u16_le($binaryData, $payloadOffset + 4);
-            $frameMeta['reserved'] = read_u16_le($binaryData, $payloadOffset + 6);
+            $count = read_u16_be($binaryData, $payloadOffset);
+            $frameMeta['frame_width'] = read_u16_be($binaryData, $payloadOffset + 2);
+            $frameMeta['frame_height'] = read_u16_be($binaryData, $payloadOffset + 4);
+            $frameMeta['reserved'] = read_u16_be($binaryData, $payloadOffset + 6);
 
             $targetsByteLength = $payloadLength - 8;
             if (($targetsByteLength % 12) !== 0) {
@@ -1175,12 +1470,12 @@ function parseBinaryStream($binaryData, $expectedProtocol, $expectedCamId)
             $targets = array();
             for ($i = 0; $i < $count; $i++) {
                 $offset = $payloadOffset + 8 + ($i * 12);
-                $x1 = read_u16_le($binaryData, $offset);
-                $y1 = read_u16_le($binaryData, $offset + 2);
-                $x2 = read_u16_le($binaryData, $offset + 4);
-                $y2 = read_u16_le($binaryData, $offset + 6);
-                $confRaw = read_u16_le($binaryData, $offset + 8);
-                $tid = read_u16_le($binaryData, $offset + 10);
+                $x1 = read_u16_be($binaryData, $offset);
+                $y1 = read_u16_be($binaryData, $offset + 2);
+                $x2 = read_u16_be($binaryData, $offset + 4);
+                $y2 = read_u16_be($binaryData, $offset + 6);
+                $confRaw = read_u16_be($binaryData, $offset + 8);
+                $tid = read_u16_be($binaryData, $offset + 10);
                 $targets[] = (new TargetVO(0, $tid, $x1, $y1, $x2, $y2, $confRaw))->toArray();
             }
 
@@ -1195,8 +1490,8 @@ function parseBinaryStream($binaryData, $expectedProtocol, $expectedCamId)
                 throw new RuntimeException('protocol 102 payload size must be at least 4 bytes');
             }
 
-            $tid = read_u16_le($payload, 0);
-            $embeddingDim = read_u16_le($payload, 2);
+            $tid = read_u16_be($payload, 0);
+            $embeddingDim = read_u16_be($payload, 2);
             $vectorBinary = substr($payload, 4);
             if ($vectorBinary === false) {
                 throw new RuntimeException('failed to read protocol 102 vector payload');
@@ -1208,7 +1503,7 @@ function parseBinaryStream($binaryData, $expectedProtocol, $expectedCamId)
             $preview = array();
             $previewCount = min(4, $embeddingDim);
             for ($i = 0; $i < $previewCount; $i++) {
-                $preview[] = read_f32_le($vectorBinary, $i * 4);
+                $preview[] = read_f32_be($vectorBinary, $i * 4);
             }
             $items = array();
             $items[] = array(
@@ -1226,12 +1521,12 @@ function parseBinaryStream($binaryData, $expectedProtocol, $expectedCamId)
                 throw new RuntimeException('protocol 103 payload size must be at least 16 bytes');
             }
 
-            $payloadType = read_u16_le($binaryData, $payloadOffset);
-            $trackId = read_u16_le($binaryData, $payloadOffset + 2);
-            $totalPackets = read_u16_le($binaryData, $payloadOffset + 4);
-            $packetIndex = read_u16_le($binaryData, $payloadOffset + 6);
-            $mediaTotalSize = read_u32_le($binaryData, $payloadOffset + 8);
-            $chunkLength = read_u32_le($binaryData, $payloadOffset + 12);
+            $payloadType = read_u16_be($binaryData, $payloadOffset);
+            $trackId = read_u16_be($binaryData, $payloadOffset + 2);
+            $totalPackets = read_u16_be($binaryData, $payloadOffset + 4);
+            $packetIndex = read_u16_be($binaryData, $payloadOffset + 6);
+            $mediaTotalSize = read_u32_be($binaryData, $payloadOffset + 8);
+            $chunkLength = read_u32_be($binaryData, $payloadOffset + 12);
             $payload = substr($binaryData, $payloadOffset + 16, $payloadLength - 16);
             if ($payload === false) {
                 throw new RuntimeException('failed to read protocol 103 media payload');
@@ -1242,8 +1537,9 @@ function parseBinaryStream($binaryData, $expectedProtocol, $expectedCamId)
 
             $frameMeta['payload_type'] = $payloadType;
             $frameMeta['track_id'] = $trackId;
-            $frameMeta['start_timestamp'] = $totalPackets;
-            $frameMeta['end_timestamp'] = $packetIndex;
+            $frameMeta['face_id'] = $trackId;
+            $frameMeta['total_packets'] = $totalPackets;
+            $frameMeta['packet_index'] = $packetIndex;
             $frameMeta['media_total_size'] = $mediaTotalSize;
             $frameMeta['chunk_length'] = $chunkLength;
             $frames[] = new StreamFrameVO(103, $camId, $timestamp, $totalPackets, array(), base64_encode($payload), $payload, $frameMeta);
@@ -1272,7 +1568,7 @@ function handle_upload_stream_request($pdo)
         $requestDTO = UploadStreamRequestDTO::fromGlobals();
         $parseResult = parseBinaryStream($requestDTO->binaryData, $requestDTO->protocol, $requestDTO->camId);
         $storedFile = persist_uploaded_binary_file($requestDTO, $parseResult);
-        $events = save_parsed_frames($pdo, $parseResult);
+        $events = save_parsed_frames($pdo, $parseResult, $requestDTO);
         emit_stream_ws_events($events);
         if (intval($requestDTO->protocol) === 102) {
             try {
@@ -1282,9 +1578,7 @@ function handle_upload_stream_request($pdo)
             }
         }
 
-        $responseData = $parseResult->toArray();
-        $responseData['stored_file'] = $storedFile['relative_path'];
-        $responseData['stored_file_size'] = $storedFile['size'];
+        $responseData = build_upload_response_data($requestDTO, $parseResult, $storedFile);
 
         respond_success($responseData, 'stream parsed successfully');
     } catch (InvalidArgumentException $e) {

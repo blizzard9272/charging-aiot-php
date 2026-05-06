@@ -4,29 +4,29 @@ function storage_path_definitions()
 {
     return array(
         'raw_upload' => array(
-            'name' => '原始流归档',
-            'description' => '上传接口收到的整包原始二进制流（未拆帧），用于问题追溯与回放。',
-            'default_template' => 'storage/{date}/{protocol}/{camera}/raw_upload'
+            'name' => '原始上传包',
+            'description' => '上传接口接收到的整包原始二进制流，未做拆帧，用于回放与问题排查。',
+            'default_template' => 'storage/{date}/protocol_{protocol}/{camera}/raw'
         ),
         'frame' => array(
-            'name' => '协议帧(frame)',
-            'description' => '从整包拆分后的单帧完整协议二进制（含帧头/帧尾/CRC）。',
-            'default_template' => 'storage/{date}/{protocol}/{camera}/frame'
+            'name' => '协议帧',
+            'description' => '从整包中拆分出的单帧协议二进制，包含帧头、帧尾和校验信息。',
+            'default_template' => 'storage/{date}/protocol_{protocol}/{camera}/frame'
         ),
         'payload' => array(
-            'name' => '业务载荷(payload)',
-            'description' => '单帧中的业务负载二进制（例如 102 向量打包载荷、103 图片载荷原文）。',
-            'default_template' => 'storage/{date}/{protocol}/{camera}/payload'
+            'name' => '业务载荷',
+            'description' => '协议帧中的业务载荷二进制，例如 102 向量载荷和 103 媒体分片载荷。',
+            'default_template' => 'storage/{date}/protocol_{protocol}/{camera}/payload'
         ),
         'image' => array(
-            'name' => '抓拍图片(image)',
-            'description' => '103 payload 解出的 JPG 图片文件。',
-            'default_template' => 'storage/{date}/{protocol}/{camera}/image'
+            'name' => '103 媒体文件',
+            'description' => '103 协议解析出的最终媒体文件，既可能是图片，也可能是视频，因此目录统一命名为 media。',
+            'default_template' => 'storage/{date}/protocol_{protocol}/{camera}/media'
         ),
         'embedding' => array(
-            'name' => '102向量(embedding)',
-            'description' => '102 单目标特征向量文件（通常 2048 字节，即 512 维 float32）。',
-            'default_template' => 'storage/{date}/{protocol}/{camera}/embedding/batch_{batch}'
+            'name' => '102 向量文件',
+            'description' => '102 协议拆出的特征向量文件，按批次单独分目录保存，便于排查和迁移。',
+            'default_template' => 'storage/{date}/protocol_{protocol}/{camera}/vector/batch_{batch}'
         )
     );
 }
@@ -181,6 +181,17 @@ function storage_project_root()
     return dirname(__DIR__, 2);
 }
 
+function storage_category_example_vars($category)
+{
+    if ($category === 'image') {
+        return array('date' => date('Ymd'), 'protocol' => '103', 'camera' => 'cam5', 'batch' => '1');
+    }
+    if ($category === 'embedding') {
+        return array('date' => date('Ymd'), 'protocol' => '102', 'camera' => 'cam5', 'batch' => '18');
+    }
+    return array('date' => date('Ymd'), 'protocol' => '101', 'camera' => 'cam5', 'batch' => '1');
+}
+
 function storage_examples(PDO $pdo)
 {
     $defs = storage_path_definitions();
@@ -188,20 +199,21 @@ function storage_examples(PDO $pdo)
     $result = array();
     foreach ($defs as $key => $meta) {
         $template = isset($settings[$key]) ? $settings[$key] : $meta['default_template'];
-        $exampleDir = storage_render_template($template, array(
-            'date' => date('Ymd'),
-            'protocol' => '102',
-            'camera' => 'cam1',
-            'batch' => '1'
-        ));
+        $vars = storage_category_example_vars($key);
+        $exampleDir = storage_render_template($template, $vars);
+        $defaultTemplate = storage_normalize_template($meta['default_template']);
         $result[] = array(
             'category_key' => $key,
             'name' => $meta['name'],
             'description' => $meta['description'],
             'path_template' => $template,
-            'example_path' => storage_relative_file_path($exampleDir, 'example.bin')
+            'default_template' => $defaultTemplate,
+            'is_recommended' => $template === $defaultTemplate ? 1 : 0,
+            'example_path' => storage_relative_file_path($exampleDir, 'example.bin'),
+            'placeholders' => $key === 'embedding'
+                ? array('{date}', '{protocol}', '{camera}', '{batch}')
+                : array('{date}', '{protocol}', '{camera}')
         );
     }
     return $result;
 }
-
