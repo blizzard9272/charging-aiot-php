@@ -86,6 +86,111 @@ function table_exists(PDO $pdo, $tableName)
     return intval($stmt->fetchColumn()) > 0;
 }
 
+function message_column_exists(PDO $pdo, $tableName, $columnName)
+{
+    $stmt = $pdo->prepare('SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ?');
+    $stmt->execute(array($tableName, $columnName));
+    return intval($stmt->fetchColumn()) > 0;
+}
+
+function ensure_query_message_columns(PDO $pdo, $tableName, $columns)
+{
+    foreach ($columns as $columnName => $definition) {
+        if (!message_column_exists($pdo, $tableName, $columnName)) {
+            $pdo->exec('ALTER TABLE ' . $tableName . ' ADD COLUMN ' . $columnName . ' ' . $definition);
+        }
+    }
+}
+
+function ensure_query_message_table_exists(PDO $pdo, $protocol)
+{
+    $tableName = 'message_' . intval($protocol) . '_records';
+    if (!table_exists($pdo, $tableName)) {
+        return false;
+    }
+
+    if (intval($protocol) === 101) {
+        ensure_query_message_columns($pdo, $tableName, array(
+            'face_id' => 'BIGINT DEFAULT NULL AFTER track_id',
+            'frame_face_count' => 'INT DEFAULT NULL AFTER obj_type',
+            'frame_width' => 'INT DEFAULT NULL AFTER frame_face_count',
+            'frame_height' => 'INT DEFAULT NULL AFTER frame_width',
+            'reserved_value' => 'INT DEFAULT NULL AFTER frame_height',
+            'protocol_version' => 'INT DEFAULT NULL AFTER conf',
+            'frame_header' => 'BIGINT UNSIGNED DEFAULT NULL AFTER protocol_version',
+            'frame_tail' => 'BIGINT UNSIGNED DEFAULT NULL AFTER frame_header',
+            'crc_value' => 'BIGINT UNSIGNED DEFAULT NULL AFTER frame_tail',
+            'frame_length' => 'BIGINT UNSIGNED DEFAULT NULL AFTER crc_value',
+            'raw_protocol_hex' => 'LONGTEXT AFTER frame_length',
+            'normalized_json' => 'LONGTEXT AFTER raw_protocol_hex',
+            'created_at' => 'DATETIME DEFAULT CURRENT_TIMESTAMP AFTER normalized_json',
+            'updated_at' => 'DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP AFTER created_at',
+            'error_message' => 'VARCHAR(500) DEFAULT NULL AFTER updated_at'
+        ));
+        return true;
+    }
+
+    if (intval($protocol) === 102) {
+        ensure_query_message_columns($pdo, $tableName, array(
+            'face_id' => 'BIGINT DEFAULT NULL AFTER track_id',
+            'information' => 'VARCHAR(255) DEFAULT NULL AFTER obj_type',
+            'person_name' => 'VARCHAR(128) DEFAULT NULL AFTER information',
+            'status_text' => 'VARCHAR(255) DEFAULT NULL AFTER person_name',
+            'feature_data' => 'LONGTEXT AFTER status_text',
+            'vector_index' => 'INT DEFAULT NULL AFTER feature_data',
+            'embedding_dim' => 'INT DEFAULT NULL AFTER vector_index',
+            'embedding_byte_length' => 'INT DEFAULT NULL AFTER embedding_dim',
+            'embedding_file_path' => 'VARCHAR(255) DEFAULT NULL AFTER embedding_byte_length',
+            'embedding_preview' => 'VARCHAR(255) DEFAULT NULL AFTER embedding_file_path',
+            'protocol_version' => 'INT DEFAULT NULL AFTER embedding_preview',
+            'frame_header' => 'BIGINT UNSIGNED DEFAULT NULL AFTER protocol_version',
+            'frame_tail' => 'BIGINT UNSIGNED DEFAULT NULL AFTER frame_header',
+            'crc_value' => 'BIGINT UNSIGNED DEFAULT NULL AFTER frame_tail',
+            'frame_length' => 'BIGINT UNSIGNED DEFAULT NULL AFTER crc_value',
+            'raw_protocol_hex' => 'LONGTEXT AFTER frame_length',
+            'normalized_json' => 'LONGTEXT AFTER raw_protocol_hex',
+            'created_at' => 'DATETIME DEFAULT CURRENT_TIMESTAMP AFTER normalized_json',
+            'updated_at' => 'DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP AFTER created_at',
+            'error_message' => 'VARCHAR(500) DEFAULT NULL AFTER updated_at'
+        ));
+        return true;
+    }
+
+    ensure_query_message_columns($pdo, $tableName, array(
+        'face_id' => 'BIGINT DEFAULT NULL AFTER track_id',
+        'media_type' => 'INT DEFAULT NULL AFTER obj_type',
+        'total_packets' => 'INT DEFAULT 0 AFTER media_type',
+        'packet_index' => 'INT DEFAULT 0 AFTER total_packets',
+        'media_total_size' => 'BIGINT DEFAULT 0 AFTER packet_index',
+        'chunk_length' => 'BIGINT DEFAULT 0 AFTER media_total_size',
+        'received_packets' => 'INT DEFAULT 0 AFTER chunk_length',
+        'received_media_size' => 'BIGINT DEFAULT 0 AFTER received_packets',
+        'is_complete_media' => 'TINYINT(1) DEFAULT 0 AFTER received_media_size',
+        'media_kind' => 'VARCHAR(32) DEFAULT NULL AFTER is_complete_media',
+        'start_timestamp_ms' => 'BIGINT DEFAULT NULL AFTER media_kind',
+        'end_timestamp_ms' => 'BIGINT DEFAULT NULL AFTER start_timestamp_ms',
+        'person_count' => 'INT DEFAULT 0 AFTER end_timestamp_ms',
+        'car_count' => 'INT DEFAULT 0 AFTER person_count',
+        'frame_image_url' => 'VARCHAR(255) DEFAULT NULL AFTER car_count',
+        'image_fetch_status' => 'VARCHAR(64) DEFAULT NULL AFTER frame_image_url',
+        'local_image_path' => 'VARCHAR(255) DEFAULT NULL AFTER image_fetch_status',
+        'image_index' => 'INT DEFAULT NULL AFTER local_image_path',
+        'image_byte_length' => 'BIGINT DEFAULT 0 AFTER image_index',
+        'protocol_version' => 'INT DEFAULT NULL AFTER image_byte_length',
+        'frame_header' => 'BIGINT UNSIGNED DEFAULT NULL AFTER protocol_version',
+        'frame_tail' => 'BIGINT UNSIGNED DEFAULT NULL AFTER frame_header',
+        'crc_value' => 'BIGINT UNSIGNED DEFAULT NULL AFTER frame_tail',
+        'frame_length' => 'BIGINT UNSIGNED DEFAULT NULL AFTER crc_value',
+        'raw_protocol_hex' => 'LONGTEXT AFTER frame_length',
+        'image_downloaded_at' => 'DATETIME DEFAULT NULL AFTER raw_protocol_hex',
+        'error_message' => 'VARCHAR(500) DEFAULT NULL AFTER image_downloaded_at',
+        'normalized_json' => 'LONGTEXT AFTER error_message',
+        'created_at' => 'DATETIME DEFAULT CURRENT_TIMESTAMP AFTER normalized_json',
+        'updated_at' => 'DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP AFTER created_at'
+    ));
+    return true;
+}
+
 function camera_code_to_int($cameraId)
 {
     if (is_numeric($cameraId)) {
@@ -815,7 +920,7 @@ function handle_query_records(PDO $pdo)
     $protocols = $protocol === null ? array(101, 102, 103) : array($protocol);
     $availableProtocols = array();
     foreach ($protocols as $pid) {
-        if (table_exists($pdo, 'message_' . $pid . '_records')) {
+        if (ensure_query_message_table_exists($pdo, $pid)) {
             $availableProtocols[] = $pid;
         }
     }
