@@ -369,11 +369,14 @@ function query_camera_options(PDO $pdo, $protocol = null)
     return $options;
 }
 
-function build_select_sql($protocol, $cameraId, $timestamps, $startEventTime, $endEventTime, &$params)
+function build_select_sql($protocol, $cameraId, $timestamps, $startEventTime, $endEventTime, $includePayload, &$params)
 {
     $table = 'message_' . $protocol . '_records';
     list($where, $whereParams) = build_where($cameraId, $timestamps, $startEventTime, $endEventTime);
     $params = array_merge($params, $whereParams);
+    $featureDataSql = $includePayload ? 'feature_data' : 'NULL feature_data';
+    $rawHexPreviewSql = 'LEFT(COALESCE(raw_protocol_hex, \'\'), 512) raw_protocol_hex_preview';
+    $rawHexSizeSql = 'CHAR_LENGTH(COALESCE(raw_protocol_hex, \'\')) raw_protocol_hex_size';
 
     if ($protocol === 101) {
         return "SELECT id, 101 protocol_id, batch_id, camera_id, event_timestamp_ms, track_id, face_id, obj_type,
@@ -385,7 +388,7 @@ function build_select_sql($protocol, $cameraId, $timestamps, $startEventTime, $e
                 NULL start_timestamp_ms, NULL end_timestamp_ms, NULL person_count, NULL car_count, NULL frame_image_url, NULL image_fetch_status,
                 NULL local_image_path, NULL image_byte_length, x1, y1, x2, y2, conf, object_index,
                 NULL error_message,
-                protocol_version, frame_header, frame_tail, crc_value, frame_length, raw_protocol_hex,
+                protocol_version, frame_header, frame_tail, crc_value, frame_length, " . $rawHexPreviewSql . ", " . $rawHexSizeSql . ",
                 normalized_json, created_at, updated_at
                 FROM message_101_records" . $where;
     }
@@ -393,14 +396,14 @@ function build_select_sql($protocol, $cameraId, $timestamps, $startEventTime, $e
     if ($protocol === 102) {
         return "SELECT id, 102 protocol_id, batch_id, camera_id, event_timestamp_ms, track_id, face_id, obj_type,
                 NULL frame_face_count, NULL frame_width, NULL frame_height, NULL reserved_value,
-                information, person_name, status_text, feature_data, embedding_dim, embedding_byte_length,
+                information, person_name, status_text, " . $featureDataSql . ", embedding_dim, embedding_byte_length,
                 embedding_file_path, embedding_preview, NULL person_count, NULL car_count, NULL frame_image_url,
                 NULL media_type, NULL total_packets, NULL packet_index, NULL media_total_size, NULL chunk_length,
                 NULL received_packets, NULL received_media_size, NULL is_complete_media, NULL media_kind,
                 NULL start_timestamp_ms, NULL end_timestamp_ms, NULL image_fetch_status, NULL local_image_path, NULL image_byte_length,
                 NULL x1, NULL y1, NULL x2, NULL y2, NULL conf, vector_index object_index,
                 NULL error_message,
-                protocol_version, frame_header, frame_tail, crc_value, frame_length, raw_protocol_hex,
+                protocol_version, frame_header, frame_tail, crc_value, frame_length, " . $rawHexPreviewSql . ", " . $rawHexSizeSql . ",
                 normalized_json, created_at, updated_at
                 FROM message_102_records" . $where;
     }
@@ -414,7 +417,7 @@ function build_select_sql($protocol, $cameraId, $timestamps, $startEventTime, $e
             person_count, car_count, frame_image_url, image_fetch_status, local_image_path, image_byte_length,
             NULL x1, NULL y1, NULL x2, NULL y2, NULL conf, image_index object_index,
             error_message,
-            protocol_version, frame_header, frame_tail, crc_value, frame_length, raw_protocol_hex,
+            protocol_version, frame_header, frame_tail, crc_value, frame_length, " . $rawHexPreviewSql . ", " . $rawHexSizeSql . ",
             normalized_json, created_at, updated_at
             FROM message_103_records" . $where;
 }
@@ -445,8 +448,8 @@ function normalize_record($row, $includePayload)
         'frame_length' => intval(isset($row['frame_length']) ? $row['frame_length'] : 0),
         'frame_seq' => intval(isset($normalized['frame_seq']) ? $normalized['frame_seq'] : (isset($normalized['frame_index']) ? $normalized['frame_index'] : 0)),
         'error_message' => strval(isset($row['error_message']) ? $row['error_message'] : ''),
-        'raw_protocol_hex_preview' => compact_hex(isset($row['raw_protocol_hex']) ? $row['raw_protocol_hex'] : ''),
-        'raw_protocol_hex_size' => strlen(strval(isset($row['raw_protocol_hex']) ? $row['raw_protocol_hex'] : '')),
+        'raw_protocol_hex_preview' => compact_hex(isset($row['raw_protocol_hex_preview']) ? $row['raw_protocol_hex_preview'] : (isset($row['raw_protocol_hex']) ? $row['raw_protocol_hex'] : '')),
+        'raw_protocol_hex_size' => intval(isset($row['raw_protocol_hex_size']) ? $row['raw_protocol_hex_size'] : strlen(strval(isset($row['raw_protocol_hex']) ? $row['raw_protocol_hex'] : ''))),
         'normalized_json' => $normalized
     );
 
@@ -479,7 +482,7 @@ function normalize_record($row, $includePayload)
             'frame_height' => intval(isset($row['frame_height']) ? $row['frame_height'] : (isset($normalized['frame_height']) ? $normalized['frame_height'] : 0)),
             'reserved_value' => intval(isset($row['reserved_value']) ? $row['reserved_value'] : (isset($normalized['reserved_value']) ? $normalized['reserved_value'] : 0)),
             'targets' => array($target),
-            'payload_hex_rebuilt' => compact_hex(isset($row['raw_protocol_hex']) ? $row['raw_protocol_hex'] : '', 512),
+            'payload_hex_rebuilt' => compact_hex(isset($row['raw_protocol_hex_preview']) ? $row['raw_protocol_hex_preview'] : (isset($row['raw_protocol_hex']) ? $row['raw_protocol_hex'] : ''), 512),
             'frame_target_count' => $frameTargetCount
         );
         return $common;
@@ -504,8 +507,8 @@ function normalize_record($row, $includePayload)
             'obj_type' => intval(isset($row['obj_type']) ? $row['obj_type'] : 0),
             'face_id' => intval(isset($row['face_id']) ? $row['face_id'] : (isset($row['track_id']) ? $row['track_id'] : 0)),
             'vector_base64_preview' => $previewBase64,
-            'vector_hex_preview' => compact_hex(isset($row['raw_protocol_hex']) ? $row['raw_protocol_hex'] : '', 96),
-            'vector_payload_hex_preview' => compact_hex(isset($row['raw_protocol_hex']) ? $row['raw_protocol_hex'] : '', 180),
+            'vector_hex_preview' => compact_hex(isset($row['raw_protocol_hex_preview']) ? $row['raw_protocol_hex_preview'] : (isset($row['raw_protocol_hex']) ? $row['raw_protocol_hex'] : ''), 96),
+            'vector_payload_hex_preview' => compact_hex(isset($row['raw_protocol_hex_preview']) ? $row['raw_protocol_hex_preview'] : (isset($row['raw_protocol_hex']) ? $row['raw_protocol_hex'] : ''), 180),
             'embedding_dim' => intval(isset($row['embedding_dim']) ? $row['embedding_dim'] : 0),
             'embedding_file_path' => strval(isset($row['embedding_file_path']) ? $row['embedding_file_path'] : ''),
             'embedding_preview' => strval(isset($row['embedding_preview']) ? $row['embedding_preview'] : ''),
@@ -543,7 +546,7 @@ function normalize_record($row, $includePayload)
         'payload_size' => intval(isset($row['image_byte_length']) ? $row['image_byte_length'] : 0),
         'tid' => intval(isset($row['track_id']) ? $row['track_id'] : (isset($normalized['track_id']) ? $normalized['track_id'] : 0)),
         'face_id' => intval(isset($row['face_id']) ? $row['face_id'] : (isset($normalized['face_id']) ? $normalized['face_id'] : (isset($row['track_id']) ? $row['track_id'] : 0))),
-        'image_hex_preview' => compact_hex(isset($row['raw_protocol_hex']) ? $row['raw_protocol_hex'] : '', 180),
+        'image_hex_preview' => compact_hex(isset($row['raw_protocol_hex_preview']) ? $row['raw_protocol_hex_preview'] : (isset($row['raw_protocol_hex']) ? $row['raw_protocol_hex'] : ''), 180),
         'base64_image' => $imageDataUrl,
         'image_data_url' => $imageDataUrl,
         'frame_image_url' => $mediaUrl,
@@ -940,7 +943,7 @@ function handle_query_records(PDO $pdo)
     $params = array();
     $selects = array();
     foreach ($availableProtocols as $pid) {
-        $selects[] = build_select_sql($pid, $cameraId, $timestamps, $startEventTime, $endEventTime, $params);
+        $selects[] = build_select_sql($pid, $cameraId, $timestamps, $startEventTime, $endEventTime, $includePayload, $params);
     }
 
     $records = array();
@@ -952,18 +955,15 @@ function handle_query_records(PDO $pdo)
         $sql = 'SELECT * FROM (' . implode(' UNION ALL ', $selects) . ') t ORDER BY created_at DESC, id DESC LIMIT ' . intval($limit) . ' OFFSET ' . intval($offset);
         $stmt = $pdo->prepare($sql);
         $stmt->execute($params);
-        $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
-        foreach ($rows as $row) {
+        while (($row = $stmt->fetch(PDO::FETCH_ASSOC)) !== false) {
             $records[] = normalize_record($row, $includePayload);
         }
     } else {
         $sqlAll = 'SELECT * FROM (' . implode(' UNION ALL ', $selects) . ') t ORDER BY created_at DESC, id DESC';
         $stmtAll = $pdo->prepare($sqlAll);
         $stmtAll->execute($params);
-        $rowsAll = $stmtAll->fetchAll(PDO::FETCH_ASSOC);
-
         $normalizedAll = array();
-        foreach ($rowsAll as $row) {
+        while (($row = $stmtAll->fetch(PDO::FETCH_ASSOC)) !== false) {
             $normalizedAll[] = normalize_record($row, $includePayload);
         }
 
