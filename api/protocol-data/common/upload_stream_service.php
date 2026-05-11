@@ -245,6 +245,13 @@ function respond_error($msg, $httpCode)
     exit;
 }
 
+function log_upload_stream_error($level, $msg)
+{
+    $remoteAddr = isset($_SERVER['REMOTE_ADDR']) ? strval($_SERVER['REMOTE_ADDR']) : '-';
+    $requestUri = isset($_SERVER['REQUEST_URI']) ? strval($_SERVER['REQUEST_URI']) : '-';
+    error_log('[upload-stream][' . $level . '][' . $remoteAddr . '] ' . $requestUri . ' :: ' . $msg);
+}
+
 function byte_at($data, $offset)
 {
     if ($offset < 0 || $offset >= strlen($data)) {
@@ -1582,10 +1589,13 @@ function handle_upload_stream_request($pdo)
 
         respond_success($responseData, 'stream parsed successfully');
     } catch (InvalidArgumentException $e) {
+        log_upload_stream_error('400', $e->getMessage());
         respond_error($e->getMessage(), 400);
     } catch (RuntimeException $e) {
+        log_upload_stream_error('422', $e->getMessage());
         respond_error($e->getMessage(), 422);
     } catch (Exception $e) {
+        log_upload_stream_error('500', $e->getMessage());
         respond_error('internal server error: ' . $e->getMessage(), 500);
     }
 }
