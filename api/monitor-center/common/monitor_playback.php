@@ -690,3 +690,62 @@ function handle_playback_list(PDO $pdo)
 
     response_success($responseData);
 }
+
+function resolve_cleanup_recordings_script_path()
+{
+    $envPath = getenv('CLEANUP_RECORDINGS_SCRIPT');
+    if (is_string($envPath) && trim($envPath) !== '') {
+        return trim($envPath);
+    }
+
+    return '/usr/local/bin/cleanup_mediamtx_records.sh';
+}
+
+function handle_cleanup_recordings(PDO $pdo)
+{
+    if (strtoupper($_SERVER['REQUEST_METHOD']) !== 'POST') {
+        response_error('Method not allowed', 405);
+    }
+
+    $scriptPath = resolve_cleanup_recordings_script_path();
+    if ($scriptPath === '' || !is_file($scriptPath)) {
+        response_error('cleanup script not found: ' . $scriptPath, 500);
+    }
+    if (!is_executable($scriptPath)) {
+        response_error('cleanup script is not executable: ' . $scriptPath, 500);
+    }
+
+    if (!function_exists('exec')) {
+        response_error('php exec() is disabled', 500);
+    }
+
+    @set_time_limit(0);
+    $output = array();
+    $code = 1;
+    $command = 'sudo ' . escapeshellarg($scriptPath) . ' 2>&1';
+    exec($command, $output, $code);
+
+    $tailLines = array_slice(array_values($output), -80);
+    $payload = array(
+        'scriptPath' => $scriptPath,
+        'exitCode' => intval($code),
+        'output' => $tailLines
+    );
+
+    write_device_audit($pdo, array(
+        'event_type' => 'MAINTENANCE',
+        'action_name' => 'cleanupRecordings',
+        'result_status' => $code === 0 ? 1 : 0,
+        'error_message' => $code === 0 ? null : 'cleanup script exit code: ' . intval($code),
+        'request_payload' => array(
+            'scriptPath' => $scriptPath
+        ),
+        'response_payload' => $payload
+    ));
+
+    if ($code !== 0) {
+        response_error('cleanup script failed with exit code ' . intval($code), 500);
+    }
+
+    response_success($payload, 'Cleanup finished');
+}

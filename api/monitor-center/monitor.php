@@ -11,6 +11,7 @@ $map = array(
     'updateGroup' => __DIR__ . '/group-management/update.php',
     'workbenchAudit' => __DIR__ . '/workbench/audit.php',
     'playbackList' => __DIR__ . '/video-list/list.php',
+    'cleanupRecordings' => __DIR__ . '/video-list/cleanup-recordings.php',
     'deviceForm' => __DIR__ . '/device-center/form.php',
     'deviceStreams' => __DIR__ . '/device-center/streams.php',
     'deleteDeviceCheck' => __DIR__ . '/device-center/delete-check.php',

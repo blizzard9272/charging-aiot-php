@@ -99,6 +99,9 @@ try {
     if ($action === 'playbackList') {
         handle_playback_list($pdo);
     }
+    if ($action === 'cleanupRecordings') {
+        handle_cleanup_recordings($pdo);
+    }
     if ($action === 'deviceForm') {
         $id = normalize_int_or_null(isset($_GET['id']) ? $_GET['id'] : null);
         if ($id === null || $id <= 0) {
