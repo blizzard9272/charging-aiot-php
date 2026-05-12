@@ -996,6 +996,127 @@ function ensure_protocol_quality_summary_table_exists(PDO $pdo)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
 }
 
+function ensure_protocol_quality_job_table_exists(PDO $pdo)
+{
+    $pdo->exec("CREATE TABLE IF NOT EXISTS protocol_quality_jobs (
+        id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+        protocol_id INT NOT NULL,
+        camera_id VARCHAR(128) NOT NULL,
+        batch_id BIGINT UNSIGNED NOT NULL,
+        status VARCHAR(24) NOT NULL DEFAULT 'pending',
+        attempts INT NOT NULL DEFAULT 0,
+        available_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        locked_at DATETIME DEFAULT NULL,
+        started_at DATETIME DEFAULT NULL,
+        finished_at DATETIME DEFAULT NULL,
+        last_error VARCHAR(500) DEFAULT NULL,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        UNIQUE KEY uk_protocol_camera_batch (protocol_id, camera_id, batch_id),
+        KEY idx_status_available (status, available_at),
+        KEY idx_locked_at (locked_at)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+}
+
+function enqueue_quality_job(PDO $pdo, $protocol, $batchId, $cameraCode)
+{
+    $stmt = $pdo->prepare(
+        "INSERT INTO protocol_quality_jobs (
+            protocol_id, camera_id, batch_id, status, attempts, available_at, locked_at, started_at, finished_at, last_error
+        ) VALUES (?, ?, ?, 'pending', 0, NOW(), NULL, NULL, NULL, NULL)
+        ON DUPLICATE KEY UPDATE
+            status = 'pending',
+            available_at = NOW(),
+            locked_at = NULL,
+            started_at = NULL,
+            finished_at = NULL,
+            last_error = NULL,
+            updated_at = CURRENT_TIMESTAMP"
+    );
+    $stmt->execute(array(intval($protocol), strval($cameraCode), intval($batchId)));
+}
+
+function fetch_quality_jobs(PDO $pdo, $limit = 20)
+{
+    $stmt = $pdo->prepare(
+        "SELECT id, protocol_id, camera_id, batch_id, attempts
+         FROM protocol_quality_jobs
+         WHERE status IN ('pending', 'failed') AND available_at <= NOW()
+         ORDER BY available_at ASC, id ASC
+         LIMIT " . intval($limit)
+    );
+    $stmt->execute();
+    return $stmt->fetchAll(PDO::FETCH_ASSOC);
+}
+
+function mark_quality_job_processing(PDO $pdo, $jobId)
+{
+    $stmt = $pdo->prepare(
+        "UPDATE protocol_quality_jobs
+         SET status = 'processing', locked_at = NOW(), started_at = NOW(), last_error = NULL
+         WHERE id = ? AND status IN ('pending', 'failed')"
+    );
+    $stmt->execute(array(intval($jobId)));
+    return $stmt->rowCount() > 0;
+}
+
+function mark_quality_job_done(PDO $pdo, $jobId)
+{
+    $stmt = $pdo->prepare(
+        "UPDATE protocol_quality_jobs
+         SET status = 'done', locked_at = NULL, finished_at = NOW(), updated_at = CURRENT_TIMESTAMP
+         WHERE id = ?"
+    );
+    $stmt->execute(array(intval($jobId)));
+}
+
+function mark_quality_job_failed(PDO $pdo, $jobId, $attempts, $message)
+{
+    $nextDelayMinutes = min(30, max(1, intval($attempts) + 1));
+    $stmt = $pdo->prepare(
+        "UPDATE protocol_quality_jobs
+         SET status = 'failed',
+             attempts = attempts + 1,
+             locked_at = NULL,
+             finished_at = NULL,
+             available_at = DATE_ADD(NOW(), INTERVAL ? MINUTE),
+             last_error = ?,
+             updated_at = CURRENT_TIMESTAMP
+         WHERE id = ?"
+    );
+    $stmt->execute(array($nextDelayMinutes, substr(strval($message), 0, 500), intval($jobId)));
+}
+
+function process_quality_job(PDO $pdo, $job)
+{
+    $jobId = intval(isset($job['id']) ? $job['id'] : 0);
+    if ($jobId <= 0) {
+        return false;
+    }
+    if (!mark_quality_job_processing($pdo, $jobId)) {
+        return false;
+    }
+
+    try {
+        $pdo->beginTransaction();
+        apply_quality_results_for_batch(
+            $pdo,
+            intval(isset($job['protocol_id']) ? $job['protocol_id'] : 0),
+            intval(isset($job['batch_id']) ? $job['batch_id'] : 0),
+            strval(isset($job['camera_id']) ? $job['camera_id'] : '')
+        );
+        $pdo->commit();
+        mark_quality_job_done($pdo, $jobId);
+        return true;
+    } catch (Exception $e) {
+        if ($pdo->inTransaction()) {
+            $pdo->rollBack();
+        }
+        mark_quality_job_failed($pdo, $jobId, intval(isset($job['attempts']) ? $job['attempts'] : 0), $e->getMessage());
+        return false;
+    }
+}
+
 function row_quality_has_error_compact($record)
 {
     $protocolId = intval(isset($record['protocol_id']) ? $record['protocol_id'] : 0);
@@ -1152,7 +1273,6 @@ function load_quality_records_for_batch(PDO $pdo, $protocol, $batchId, $cameraCo
 
 function apply_quality_results_for_batch(PDO $pdo, $protocol, $batchId, $cameraCode)
 {
-    ensure_protocol_quality_summary_table_exists($pdo);
     $records = load_quality_records_for_batch($pdo, $protocol, $batchId, $cameraCode);
     if (empty($records)) {
         return array('state_map' => array(), 'summary' => array());
@@ -1218,6 +1338,8 @@ function save_parsed_frames($pdo, $parseResult, $requestDTO = null)
 {
     $protocol = intval($parseResult->protocol);
     $tableName = ensure_message_table_exists($pdo, $protocol);
+    ensure_protocol_quality_job_table_exists($pdo);
+    ensure_protocol_quality_summary_table_exists($pdo);
     $batchId = next_batch_id($pdo, $tableName);
     $cameraCode = build_camera_code($parseResult->camId);
 
@@ -1607,16 +1729,7 @@ function save_parsed_frames($pdo, $parseResult, $requestDTO = null)
             }
         }
 
-        $qualityResult = apply_quality_results_for_batch($pdo, $protocol, $batchId, $cameraCode);
-        if (!empty($qualityResult['state_map'])) {
-            foreach ($wsEvents as &$event) {
-                $recordId = intval(isset($event['record_id']) ? $event['record_id'] : 0);
-                if ($recordId > 0 && isset($qualityResult['state_map'][$recordId])) {
-                    $event['quality_status'] = $qualityResult['state_map'][$recordId];
-                }
-            }
-            unset($event);
-        }
+        enqueue_quality_job($pdo, $protocol, $batchId, $cameraCode);
 
         $pdo->commit();
         return $wsEvents;

@@ -38,16 +38,7 @@ try {
                 continue;
             }
 
-            $pdo->beginTransaction();
-            try {
-                apply_quality_results_for_batch($pdo, $protocol, $batchId, $cameraId);
-                $pdo->commit();
-            } catch (Exception $e) {
-                if ($pdo->inTransaction()) {
-                    $pdo->rollBack();
-                }
-                throw $e;
-            }
+            apply_quality_results_for_batch($pdo, $protocol, $batchId, $cameraId);
 
             if ((($index + 1) % 100) === 0) {
                 fwrite(STDOUT, "Processed $protocol: " . ($index + 1) . '/' . count($rows) . "\n");
