@@ -565,10 +565,20 @@ function emit_stream_ws_events($events)
 
     $runtimeDir = dirname(__DIR__, 3) . '/runtime';
     if (!is_dir($runtimeDir)) {
-        @mkdir($runtimeDir, 0777, true);
+        $created = @mkdir($runtimeDir, 0777, true);
+        if (!$created && !is_dir($runtimeDir)) {
+            error_log('[upload-stream][ws-events] failed to create runtime dir: ' . $runtimeDir
+                . ' uid=' . (function_exists('getmyuid') ? strval(getmyuid()) : 'n/a'));
+            return;
+        }
     }
 
     if (!is_dir($runtimeDir) || !is_writable($runtimeDir)) {
+        error_log('[upload-stream][ws-events] runtime dir not writable: ' . $runtimeDir
+            . ' exists=' . (is_dir($runtimeDir) ? '1' : '0')
+            . ' writable=' . (is_writable($runtimeDir) ? '1' : '0')
+            . ' owner=' . (@fileowner($runtimeDir))
+            . ' perms=' . substr(sprintf('%o', @fileperms($runtimeDir)), -4));
         return;
     }
 
@@ -577,7 +587,10 @@ function emit_stream_ws_events($events)
         $size = @filesize($eventFile);
         if ($size !== false && $size > (8 * 1024 * 1024)) {
             @unlink($eventFile . '.1');
-            @rename($eventFile, $eventFile . '.1');
+            $rotated = @rename($eventFile, $eventFile . '.1');
+            if (!$rotated && file_exists($eventFile)) {
+                error_log('[upload-stream][ws-events] failed to rotate event file: ' . $eventFile);
+            }
         }
     }
 
@@ -591,7 +604,15 @@ function emit_stream_ws_events($events)
     }
 
     if ($lines !== '') {
-        @file_put_contents($eventFile, $lines, FILE_APPEND | LOCK_EX);
+        $written = @file_put_contents($eventFile, $lines, FILE_APPEND | LOCK_EX);
+        if ($written === false) {
+            error_log('[upload-stream][ws-events] failed to append events to file: ' . $eventFile
+                . ' lines=' . substr_count($lines, "\n")
+                . ' writable=' . (file_exists($eventFile) ? (is_writable($eventFile) ? '1' : '0') : 'new-file')
+                . ' dir_writable=' . (is_writable($runtimeDir) ? '1' : '0')
+                . ' owner=' . (file_exists($eventFile) ? @fileowner($eventFile) : 'n/a')
+                . ' perms=' . (file_exists($eventFile) ? substr(sprintf('%o', @fileperms($eventFile)), -4) : 'n/a'));
+        }
     }
 }
 
