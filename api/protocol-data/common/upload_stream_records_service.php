@@ -385,6 +385,82 @@ function query_quality_summary_from_table(PDO $pdo, $protocol, $cameraId, $start
     );
 }
 
+function query_data_center_overview(PDO $pdo)
+{
+    $protocolTotals = array(101 => 0, 102 => 0, 103 => 0);
+    foreach (array(101, 102, 103) as $pid) {
+        $protocolTotals[$pid] = count_table($pdo, 'message_' . $pid . '_records', null, array(), null, null);
+    }
+
+    $cameraSelects = array();
+    foreach (array(101, 102, 103) as $pid) {
+        $table = 'message_' . $pid . '_records';
+        if (table_exists($pdo, $table)) {
+            $cameraSelects[] = "SELECT camera_id FROM $table WHERE camera_id IS NOT NULL AND camera_id <> ''";
+        }
+    }
+
+    $cameraCount = 0;
+    if (!empty($cameraSelects)) {
+        $cameraStmt = $pdo->query('SELECT COUNT(DISTINCT camera_id) AS total FROM (' . implode(' UNION ALL ', $cameraSelects) . ') t');
+        $cameraCount = intval($cameraStmt ? $cameraStmt->fetchColumn() : 0);
+    }
+
+    $targetCount = 0;
+    if (table_exists($pdo, 'message_101_records')) {
+        $stmt101 = $pdo->query("SELECT COALESCE(SUM(CASE
+            WHEN NOT (IFNULL(x1, 0) = 0 AND IFNULL(y1, 0) = 0 AND IFNULL(x2, 0) = 0 AND IFNULL(y2, 0) = 0) THEN 1
+            ELSE GREATEST(COALESCE(CAST(JSON_UNQUOTE(JSON_EXTRACT(normalized_json, '$.frame_target_count')) AS SIGNED), 0), 0)
+        END), 0) AS total FROM message_101_records");
+        $targetCount = intval($stmt101 ? $stmt101->fetchColumn() : 0);
+    }
+
+    $vectorBytes = 0;
+    if (table_exists($pdo, 'message_102_records')) {
+        $stmt102 = $pdo->query('SELECT COALESCE(SUM(embedding_byte_length), 0) AS total FROM message_102_records');
+        $vectorBytes = intval($stmt102 ? $stmt102->fetchColumn() : 0);
+    }
+
+    $imageSuccess = 0;
+    if (table_exists($pdo, 'message_103_records')) {
+        $stmt103 = $pdo->query("SELECT COUNT(*) AS total FROM message_103_records WHERE COALESCE(image_fetch_status, '') = 'success'");
+        $imageSuccess = intval($stmt103 ? $stmt103->fetchColumn() : 0);
+    }
+
+    $latestEventTime = 0;
+    $latestReceivedTime = '';
+    $latestEventSelects = array();
+    $latestReceivedSelects = array();
+    foreach (array(101, 102, 103) as $pid) {
+        $table = 'message_' . $pid . '_records';
+        if (table_exists($pdo, $table)) {
+            $latestEventSelects[] = "SELECT MAX(event_timestamp_ms) AS latest_event_time FROM $table";
+            $latestReceivedSelects[] = "SELECT MAX(created_at) AS latest_received_time FROM $table";
+        }
+    }
+    if (!empty($latestEventSelects)) {
+        $eventStmt = $pdo->query('SELECT MAX(latest_event_time) AS latest_event_time FROM (' . implode(' UNION ALL ', $latestEventSelects) . ') t');
+        $latestEventTime = intval($eventStmt ? $eventStmt->fetchColumn() : 0);
+    }
+    if (!empty($latestReceivedSelects)) {
+        $receivedStmt = $pdo->query('SELECT MAX(latest_received_time) AS latest_received_time FROM (' . implode(' UNION ALL ', $latestReceivedSelects) . ') t');
+        $latestReceivedTime = strval($receivedStmt ? $receivedStmt->fetchColumn() : '');
+    }
+
+    return array(
+        'protocol_totals' => $protocolTotals,
+        'summary' => array(
+            'total_records' => intval($protocolTotals[101] + $protocolTotals[102] + $protocolTotals[103]),
+            'camera_count' => $cameraCount,
+            'target_count' => $targetCount,
+            'vector_bytes' => $vectorBytes,
+            'image_success' => $imageSuccess,
+            'latest_event_time' => $latestEventTime,
+            'latest_received_time' => $latestReceivedTime
+        )
+    );
+}
+
 function query_camera_options(PDO $pdo, $protocol = null)
 {
     $protocolValue = normalize_int_or_null($protocol);
@@ -1309,6 +1385,15 @@ function handle_query_aggregate(PDO $pdo)
         'receive_timeline' => $receiveTimeline['rows'],
         'camera_distribution' => query_protocol_camera_distribution($pdo, $tableName, $cameraId, $timestamps, $startEventTime, $endEventTime, 12)
     ), 'ok');
+}
+
+function handle_query_overview(PDO $pdo)
+{
+    if (strtoupper(isset($_SERVER['REQUEST_METHOD']) ? $_SERVER['REQUEST_METHOD'] : '') !== 'GET') {
+        respond_error('Only GET method is supported', 405);
+    }
+
+    respond_success(query_data_center_overview($pdo), 'ok');
 }
 
 function handle_query_records(PDO $pdo)
