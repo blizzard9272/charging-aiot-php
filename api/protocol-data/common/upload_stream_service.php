@@ -976,6 +976,244 @@ function encode_json_text($payload)
     return $json === false ? '{}' : $json;
 }
 
+function ensure_protocol_quality_summary_table_exists(PDO $pdo)
+{
+    $pdo->exec("CREATE TABLE IF NOT EXISTS protocol_quality_summary (
+        id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+        protocol_id INT NOT NULL,
+        camera_id VARCHAR(128) NOT NULL,
+        batch_id BIGINT UNSIGNED NOT NULL,
+        record_total INT NOT NULL DEFAULT 0,
+        error_count INT NOT NULL DEFAULT 0,
+        missing_count INT NOT NULL DEFAULT 0,
+        missing_frames INT NOT NULL DEFAULT 0,
+        first_event_timestamp_ms BIGINT DEFAULT NULL,
+        last_event_timestamp_ms BIGINT DEFAULT NULL,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        UNIQUE KEY uk_protocol_camera_batch (protocol_id, camera_id, batch_id),
+        KEY idx_protocol_updated (protocol_id, updated_at),
+        KEY idx_protocol_camera_time (protocol_id, camera_id, last_event_timestamp_ms)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+}
+
+function row_quality_has_error_compact($record)
+{
+    $protocolId = intval(isset($record['protocol_id']) ? $record['protocol_id'] : 0);
+    $errorMessage = strval(isset($record['error_message']) ? $record['error_message'] : '');
+    if ($errorMessage !== '') {
+        return true;
+    }
+    if ($protocolId === 103) {
+        $imageStatus = strtolower(strval(isset($record['image_fetch_status']) ? $record['image_fetch_status'] : ''));
+        if ($imageStatus !== '' && $imageStatus !== 'success') {
+            return true;
+        }
+    }
+    return false;
+}
+
+function build_quality_state_map_compact($records, &$errorCount = 0, &$missingCount = 0, &$missingFrames = 0)
+{
+    $errorIds = array();
+    $missingIds = array();
+    $frameGroups = array();
+
+    foreach ($records as $record) {
+        $recordId = intval(isset($record['record_id']) ? $record['record_id'] : 0);
+        if ($recordId <= 0) {
+            continue;
+        }
+        if (row_quality_has_error_compact($record)) {
+            $errorIds[$recordId] = true;
+        }
+
+        $seq = null;
+        if (isset($record['frame_seq']) && is_numeric($record['frame_seq'])) {
+            $seq = intval($record['frame_seq']);
+        }
+        if ($seq === null) {
+            continue;
+        }
+
+        $camera = strval(isset($record['camera_id']) ? $record['camera_id'] : '');
+        $batchId = intval(isset($record['batch_id']) ? $record['batch_id'] : 0);
+        $protocolId = intval(isset($record['protocol_id']) ? $record['protocol_id'] : 0);
+        $timestamp = intval(isset($record['timestamp']) ? $record['timestamp'] : 0);
+        $groupKey = $protocolId . '::' . $camera . '::' . $batchId;
+        $frameKey = $seq . '::' . $timestamp;
+
+        if (!isset($frameGroups[$groupKey])) {
+            $frameGroups[$groupKey] = array();
+        }
+        if (!isset($frameGroups[$groupKey][$frameKey])) {
+            $frameGroups[$groupKey][$frameKey] = array(
+                'seq' => $seq,
+                'timestamp' => $timestamp,
+                'record_ids' => array()
+            );
+        }
+        $frameGroups[$groupKey][$frameKey]['record_ids'][$recordId] = true;
+    }
+
+    foreach ($frameGroups as $framesByKey) {
+        $frames = array_values($framesByKey);
+        usort($frames, function ($a, $b) {
+            if (intval($a['timestamp']) === intval($b['timestamp'])) {
+                return intval($a['seq']) - intval($b['seq']);
+            }
+            return intval($a['timestamp']) - intval($b['timestamp']);
+        });
+
+        $prevSeq = null;
+        $prevTs = null;
+        foreach ($frames as $frame) {
+            $seq = intval($frame['seq']);
+            $ts = intval($frame['timestamp']);
+            if ($prevSeq !== null) {
+                if ($seq > $prevSeq + 1) {
+                    $missingFrames += ($seq - $prevSeq - 1);
+                    foreach ($frame['record_ids'] as $rid => $_) {
+                        $missingIds[intval($rid)] = true;
+                    }
+                } elseif ($seq < $prevSeq || ($seq === $prevSeq && $ts !== $prevTs)) {
+                    foreach ($frame['record_ids'] as $rid => $_) {
+                        $errorIds[intval($rid)] = true;
+                    }
+                }
+            }
+            $prevSeq = $seq;
+            $prevTs = $ts;
+        }
+    }
+
+    $stateMap = array();
+    foreach ($records as $record) {
+        $recordId = intval(isset($record['record_id']) ? $record['record_id'] : 0);
+        if ($recordId <= 0) {
+            continue;
+        }
+        $hasError = isset($errorIds[$recordId]);
+        $hasMissing = isset($missingIds[$recordId]);
+        if ($hasError && $hasMissing) {
+            $stateMap[$recordId] = 'error_missing';
+        } elseif ($hasError) {
+            $stateMap[$recordId] = 'error';
+        } elseif ($hasMissing) {
+            $stateMap[$recordId] = 'missing';
+        } else {
+            $stateMap[$recordId] = 'normal';
+        }
+    }
+
+    $errorCount = count($errorIds);
+    $missingCount = count($missingIds);
+    return $stateMap;
+}
+
+function load_quality_records_for_batch(PDO $pdo, $protocol, $batchId, $cameraCode)
+{
+    $table = 'message_' . intval($protocol) . '_records';
+    if (intval($protocol) === 103) {
+        $sql = "SELECT id, batch_id, camera_id, event_timestamp_ms, error_message, image_fetch_status, normalized_json
+                FROM $table WHERE batch_id = ? AND camera_id = ? ORDER BY event_timestamp_ms ASC, id ASC";
+    } else {
+        $sql = "SELECT id, batch_id, camera_id, event_timestamp_ms, error_message, normalized_json
+                FROM $table WHERE batch_id = ? AND camera_id = ? ORDER BY event_timestamp_ms ASC, id ASC";
+    }
+    $stmt = $pdo->prepare($sql);
+    $stmt->execute(array(intval($batchId), strval($cameraCode)));
+    $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+    $records = array();
+    foreach ($rows as $row) {
+        $normalized = json_decode(strval(isset($row['normalized_json']) ? $row['normalized_json'] : ''), true);
+        if (!is_array($normalized)) {
+            $normalized = array();
+        }
+        $frameSeq = null;
+        if (isset($normalized['frame_seq']) && is_numeric($normalized['frame_seq'])) {
+            $frameSeq = intval($normalized['frame_seq']);
+        } elseif (isset($normalized['frame_index']) && is_numeric($normalized['frame_index'])) {
+            $frameSeq = intval($normalized['frame_index']);
+        }
+        $records[] = array(
+            'record_id' => intval($row['id']),
+            'protocol_id' => intval($protocol),
+            'batch_id' => intval($row['batch_id']),
+            'camera_id' => strval($row['camera_id']),
+            'timestamp' => intval($row['event_timestamp_ms']),
+            'frame_seq' => $frameSeq,
+            'error_message' => strval(isset($row['error_message']) ? $row['error_message'] : ''),
+            'image_fetch_status' => strval(isset($row['image_fetch_status']) ? $row['image_fetch_status'] : '')
+        );
+    }
+    return $records;
+}
+
+function apply_quality_results_for_batch(PDO $pdo, $protocol, $batchId, $cameraCode)
+{
+    ensure_protocol_quality_summary_table_exists($pdo);
+    $records = load_quality_records_for_batch($pdo, $protocol, $batchId, $cameraCode);
+    if (empty($records)) {
+        return array('state_map' => array(), 'summary' => array());
+    }
+
+    $errorCount = 0;
+    $missingCount = 0;
+    $missingFrames = 0;
+    $stateMap = build_quality_state_map_compact($records, $errorCount, $missingCount, $missingFrames);
+
+    $table = 'message_' . intval($protocol) . '_records';
+    $updateStmt = $pdo->prepare("UPDATE $table SET quality_status = ?, quality_checked_at = NOW() WHERE id = ?");
+    foreach ($stateMap as $recordId => $state) {
+        $updateStmt->execute(array($state, intval($recordId)));
+    }
+
+    $timestamps = array_map(function ($item) {
+        return intval(isset($item['timestamp']) ? $item['timestamp'] : 0);
+    }, $records);
+    sort($timestamps);
+    $summary = array(
+        'protocol_id' => intval($protocol),
+        'camera_id' => strval($cameraCode),
+        'batch_id' => intval($batchId),
+        'record_total' => count($records),
+        'error_count' => $errorCount,
+        'missing_count' => $missingCount,
+        'missing_frames' => $missingFrames,
+        'first_event_timestamp_ms' => !empty($timestamps) ? intval($timestamps[0]) : null,
+        'last_event_timestamp_ms' => !empty($timestamps) ? intval($timestamps[count($timestamps) - 1]) : null
+    );
+
+    $upsertStmt = $pdo->prepare(
+        'INSERT INTO protocol_quality_summary (
+            protocol_id, camera_id, batch_id, record_total, error_count, missing_count, missing_frames,
+            first_event_timestamp_ms, last_event_timestamp_ms
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON DUPLICATE KEY UPDATE
+            record_total = VALUES(record_total),
+            error_count = VALUES(error_count),
+            missing_count = VALUES(missing_count),
+            missing_frames = VALUES(missing_frames),
+            first_event_timestamp_ms = VALUES(first_event_timestamp_ms),
+            last_event_timestamp_ms = VALUES(last_event_timestamp_ms),
+            updated_at = CURRENT_TIMESTAMP'
+    );
+    $upsertStmt->execute(array(
+        $summary['protocol_id'],
+        $summary['camera_id'],
+        $summary['batch_id'],
+        $summary['record_total'],
+        $summary['error_count'],
+        $summary['missing_count'],
+        $summary['missing_frames'],
+        $summary['first_event_timestamp_ms'],
+        $summary['last_event_timestamp_ms']
+    ));
+
+    return array('state_map' => $stateMap, 'summary' => $summary);
+}
+
 function save_parsed_frames($pdo, $parseResult, $requestDTO = null)
 {
     $protocol = intval($parseResult->protocol);
@@ -1367,6 +1605,17 @@ function save_parsed_frames($pdo, $parseResult, $requestDTO = null)
                 );
                 break;
             }
+        }
+
+        $qualityResult = apply_quality_results_for_batch($pdo, $protocol, $batchId, $cameraCode);
+        if (!empty($qualityResult['state_map'])) {
+            foreach ($wsEvents as &$event) {
+                $recordId = intval(isset($event['record_id']) ? $event['record_id'] : 0);
+                if ($recordId > 0 && isset($qualityResult['state_map'][$recordId])) {
+                    $event['quality_status'] = $qualityResult['state_map'][$recordId];
+                }
+            }
+            unset($event);
         }
 
         $pdo->commit();

@@ -331,6 +331,60 @@ function count_table(PDO $pdo, $tableName, $cameraId, $timestamps = array(), $st
     return intval($stmt->fetchColumn());
 }
 
+function ensure_protocol_quality_summary_table_exists(PDO $pdo)
+{
+    $pdo->exec("CREATE TABLE IF NOT EXISTS protocol_quality_summary (
+        id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+        protocol_id INT NOT NULL,
+        camera_id VARCHAR(128) NOT NULL,
+        batch_id BIGINT UNSIGNED NOT NULL,
+        record_total INT NOT NULL DEFAULT 0,
+        error_count INT NOT NULL DEFAULT 0,
+        missing_count INT NOT NULL DEFAULT 0,
+        missing_frames INT NOT NULL DEFAULT 0,
+        first_event_timestamp_ms BIGINT DEFAULT NULL,
+        last_event_timestamp_ms BIGINT DEFAULT NULL,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        UNIQUE KEY uk_protocol_camera_batch (protocol_id, camera_id, batch_id),
+        KEY idx_protocol_updated (protocol_id, updated_at),
+        KEY idx_protocol_camera_time (protocol_id, camera_id, last_event_timestamp_ms)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+}
+
+function query_quality_summary_from_table(PDO $pdo, $protocol, $cameraId, $startEventTime = null, $endEventTime = null)
+{
+    ensure_protocol_quality_summary_table_exists($pdo);
+    $sql = 'SELECT
+                COALESCE(SUM(error_count), 0) error_count,
+                COALESCE(SUM(missing_count), 0) missing_count,
+                COALESCE(SUM(missing_frames), 0) missing_frames
+            FROM protocol_quality_summary
+            WHERE protocol_id = ?';
+    $params = array(intval($protocol));
+
+    if ($cameraId !== null) {
+        $sql .= ' AND camera_id = ?';
+        $params[] = $cameraId;
+    }
+    if ($startEventTime !== null) {
+        $sql .= ' AND last_event_timestamp_ms >= ?';
+        $params[] = intval($startEventTime);
+    }
+    if ($endEventTime !== null) {
+        $sql .= ' AND first_event_timestamp_ms <= ?';
+        $params[] = intval($endEventTime);
+    }
+
+    $stmt = $pdo->prepare($sql);
+    $stmt->execute($params);
+    $row = $stmt->fetch(PDO::FETCH_ASSOC);
+    return array(
+        'error_count' => intval(isset($row['error_count']) ? $row['error_count'] : 0),
+        'missing_count' => intval(isset($row['missing_count']) ? $row['missing_count'] : 0),
+        'missing_frames' => intval(isset($row['missing_frames']) ? $row['missing_frames'] : 0)
+    );
+}
+
 function query_camera_options(PDO $pdo, $protocol = null)
 {
     $protocolValue = normalize_int_or_null($protocol);
@@ -387,7 +441,7 @@ function build_select_sql($protocol, $cameraId, $timestamps, $startEventTime, $e
                 NULL received_packets, NULL received_media_size, NULL is_complete_media, NULL media_kind,
                 NULL start_timestamp_ms, NULL end_timestamp_ms, NULL person_count, NULL car_count, NULL frame_image_url, NULL image_fetch_status,
                 NULL local_image_path, NULL image_byte_length, x1, y1, x2, y2, conf, object_index,
-                NULL error_message,
+                NULL error_message, quality_status,
                 protocol_version, frame_header, frame_tail, crc_value, frame_length, " . $rawHexPreviewSql . ", " . $rawHexSizeSql . ",
                 normalized_json, created_at, updated_at
                 FROM message_101_records" . $where;
@@ -402,7 +456,7 @@ function build_select_sql($protocol, $cameraId, $timestamps, $startEventTime, $e
                 NULL received_packets, NULL received_media_size, NULL is_complete_media, NULL media_kind,
                 NULL start_timestamp_ms, NULL end_timestamp_ms, NULL image_fetch_status, NULL local_image_path, NULL image_byte_length,
                 NULL x1, NULL y1, NULL x2, NULL y2, NULL conf, vector_index object_index,
-                NULL error_message,
+                NULL error_message, quality_status,
                 protocol_version, frame_header, frame_tail, crc_value, frame_length, " . $rawHexPreviewSql . ", " . $rawHexSizeSql . ",
                 normalized_json, created_at, updated_at
                 FROM message_102_records" . $where;
@@ -416,7 +470,7 @@ function build_select_sql($protocol, $cameraId, $timestamps, $startEventTime, $e
             received_packets, received_media_size, is_complete_media, media_kind, start_timestamp_ms, end_timestamp_ms,
             person_count, car_count, frame_image_url, image_fetch_status, local_image_path, image_byte_length,
             NULL x1, NULL y1, NULL x2, NULL y2, NULL conf, image_index object_index,
-            error_message,
+            error_message, quality_status,
             protocol_version, frame_header, frame_tail, crc_value, frame_length, " . $rawHexPreviewSql . ", " . $rawHexSizeSql . ",
             normalized_json, created_at, updated_at
             FROM message_103_records" . $where;
@@ -448,6 +502,7 @@ function normalize_record($row, $includePayload)
         'frame_length' => intval(isset($row['frame_length']) ? $row['frame_length'] : 0),
         'frame_seq' => intval(isset($normalized['frame_seq']) ? $normalized['frame_seq'] : (isset($normalized['frame_index']) ? $normalized['frame_index'] : 0)),
         'error_message' => strval(isset($row['error_message']) ? $row['error_message'] : ''),
+        'quality_status' => strval(isset($row['quality_status']) ? $row['quality_status'] : ''),
         'raw_protocol_hex_preview' => compact_hex(isset($row['raw_protocol_hex_preview']) ? $row['raw_protocol_hex_preview'] : (isset($row['raw_protocol_hex']) ? $row['raw_protocol_hex'] : '')),
         'raw_protocol_hex_size' => intval(isset($row['raw_protocol_hex_size']) ? $row['raw_protocol_hex_size'] : strlen(strval(isset($row['raw_protocol_hex']) ? $row['raw_protocol_hex'] : ''))),
         'normalized_json' => $normalized
@@ -892,6 +947,370 @@ function quality_match($qualityStatus, $state)
     return true;
 }
 
+function normalize_aggregate_granularity($value)
+{
+    $text = strtolower(trim(strval($value)));
+    if (!in_array($text, array('year', 'quarter', 'month', 'week', 'day', 'hourly'), true)) {
+        return 'day';
+    }
+    return $text;
+}
+
+function normalize_date_text_or_null($value)
+{
+    if ($value === null) {
+        return null;
+    }
+    $text = trim(strval($value));
+    if ($text === '') {
+        return null;
+    }
+    return preg_match('/^\d{4}-\d{2}-\d{2}$/', $text) === 1 ? $text : null;
+}
+
+function query_single_row_assoc(PDO $pdo, $sql, $params = array())
+{
+    $stmt = $pdo->prepare($sql);
+    $stmt->execute($params);
+    $row = $stmt->fetch(PDO::FETCH_ASSOC);
+    return is_array($row) ? $row : null;
+}
+
+function build_protocol_quality_summary(PDO $pdo, $protocol, $cameraId, $timestamps = array(), $startEventTime = null, $endEventTime = null)
+{
+    $params = array();
+    $sql = build_select_sql(intval($protocol), $cameraId, $timestamps, $startEventTime, $endEventTime, false, $params)
+        . ' ORDER BY created_at DESC, id DESC';
+    $stmt = $pdo->prepare($sql);
+    $stmt->execute($params);
+
+    $records = array();
+    while (($row = $stmt->fetch(PDO::FETCH_ASSOC)) !== false) {
+        $records[] = normalize_record($row, false);
+    }
+
+    $errorCount = 0;
+    $missingCount = 0;
+    $missingFrames = 0;
+    build_quality_state_map($records, $errorCount, $missingCount, $missingFrames);
+    return array(
+        'error_count' => $errorCount,
+        'missing_count' => $missingCount,
+        'missing_frames' => $missingFrames
+    );
+}
+
+function build_timeline_bucket_config($datetimeExpr, $granularity)
+{
+    if ($granularity === 'year') {
+        return array(
+            'label_expr' => "CONCAT(YEAR($datetimeExpr), '年')",
+            'sort_expr' => "YEAR($datetimeExpr)"
+        );
+    }
+    if ($granularity === 'quarter') {
+        return array(
+            'label_expr' => "CONCAT(YEAR($datetimeExpr), ' Q', QUARTER($datetimeExpr))",
+            'sort_expr' => "(YEAR($datetimeExpr) * 10 + QUARTER($datetimeExpr))"
+        );
+    }
+    if ($granularity === 'month') {
+        return array(
+            'label_expr' => "DATE_FORMAT($datetimeExpr, '%Y-%m')",
+            'sort_expr' => "DATE_FORMAT($datetimeExpr, '%Y-%m-01 00:00:00')"
+        );
+    }
+    if ($granularity === 'week') {
+        $weekStartExpr = "DATE_SUB(DATE($datetimeExpr), INTERVAL WEEKDAY($datetimeExpr) DAY)";
+        return array(
+            'label_expr' => "CONCAT(DATE_FORMAT($weekStartExpr, '%Y-%m-%d'), '周')",
+            'sort_expr' => $weekStartExpr
+        );
+    }
+    if ($granularity === 'hourly') {
+        return array(
+            'label_expr' => "CONCAT(LPAD(HOUR($datetimeExpr), 2, '0'), ':00-', LPAD(HOUR($datetimeExpr), 2, '0'), ':59')",
+            'sort_expr' => "HOUR($datetimeExpr)"
+        );
+    }
+    return array(
+        'label_expr' => "DATE_FORMAT($datetimeExpr, '%Y-%m-%d')",
+        'sort_expr' => "DATE_FORMAT($datetimeExpr, '%Y-%m-%d 00:00:00')"
+    );
+}
+
+function query_protocol_latest_day(PDO $pdo, $tableName, $whereSql, $params, $timeMode)
+{
+    if ($timeMode === 'receive') {
+        $sql = "SELECT DATE_FORMAT(MAX(created_at), '%Y-%m-%d') latest_day FROM $tableName" . $whereSql;
+    } else {
+        $sql = "SELECT DATE_FORMAT(MAX(FROM_UNIXTIME(event_timestamp_ms / 1000)), '%Y-%m-%d') latest_day FROM $tableName" . $whereSql;
+    }
+    $row = query_single_row_assoc($pdo, $sql, $params);
+    return $row && !empty($row['latest_day']) ? strval($row['latest_day']) : '';
+}
+
+function query_protocol_timeline(PDO $pdo, $tableName, $cameraId, $timestamps, $startEventTime, $endEventTime, $timeMode, $granularity, $hourlyDate = null)
+{
+    list($whereSql, $params) = build_where($cameraId, $timestamps, $startEventTime, $endEventTime);
+
+    if ($timeMode === 'receive') {
+        $datetimeExpr = 'created_at';
+    } else {
+        $datetimeExpr = 'FROM_UNIXTIME(event_timestamp_ms / 1000)';
+    }
+
+    $effectiveDate = '';
+    if ($granularity === 'hourly') {
+        $effectiveDate = $hourlyDate !== null && $hourlyDate !== '' ? $hourlyDate : query_protocol_latest_day($pdo, $tableName, $whereSql, $params, $timeMode);
+        if ($effectiveDate !== '') {
+            if ($timeMode === 'receive') {
+                $whereSql .= ' AND created_at >= ? AND created_at < ?';
+                $params[] = $effectiveDate . ' 00:00:00';
+                $params[] = date('Y-m-d H:i:s', strtotime($effectiveDate . ' +1 day'));
+            } else {
+                $dayStartMs = intval(strtotime($effectiveDate . ' 00:00:00')) * 1000;
+                $nextDayMs = intval(strtotime($effectiveDate . ' +1 day 00:00:00')) * 1000;
+                $whereSql .= ' AND event_timestamp_ms >= ? AND event_timestamp_ms < ?';
+                $params[] = $dayStartMs;
+                $params[] = $nextDayMs;
+            }
+        }
+    }
+
+    $bucket = build_timeline_bucket_config($datetimeExpr, $granularity);
+    $sql = "SELECT {$bucket['label_expr']} AS label, {$bucket['sort_expr']} AS sort_key, COUNT(*) AS value
+            FROM $tableName" . $whereSql . "
+            GROUP BY label, sort_key
+            ORDER BY sort_key ASC";
+
+    $stmt = $pdo->prepare($sql);
+    $stmt->execute($params);
+    $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+    $result = array();
+    foreach ($rows as $row) {
+        $result[] = array(
+            'label' => strval(isset($row['label']) ? $row['label'] : ''),
+            'value' => intval(isset($row['value']) ? $row['value'] : 0)
+        );
+    }
+
+    return array(
+        'effective_date' => $effectiveDate,
+        'rows' => $result
+    );
+}
+
+function query_protocol_camera_distribution(PDO $pdo, $tableName, $cameraId, $timestamps, $startEventTime, $endEventTime, $limit = 12)
+{
+    list($whereSql, $params) = build_where($cameraId, $timestamps, $startEventTime, $endEventTime);
+    $whereSql .= " AND camera_id IS NOT NULL AND camera_id <> ''";
+
+    $sql = "SELECT camera_id, COUNT(*) AS value
+            FROM $tableName" . $whereSql . "
+            GROUP BY camera_id
+            ORDER BY value DESC, camera_id ASC
+            LIMIT " . intval($limit);
+
+    $stmt = $pdo->prepare($sql);
+    $stmt->execute($params);
+    $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+    $result = array();
+    foreach ($rows as $row) {
+        $result[] = array(
+            'name' => strval(isset($row['camera_id']) ? $row['camera_id'] : ''),
+            'value' => intval(isset($row['value']) ? $row['value'] : 0)
+        );
+    }
+    return $result;
+}
+
+function query_protocol_edge_row(PDO $pdo, $tableName, $whereSql, $params, $field, $direction)
+{
+    $sql = "SELECT camera_id, $field AS field_value
+            FROM $tableName" . $whereSql . "
+            ORDER BY $field $direction, id $direction
+            LIMIT 1";
+    return query_single_row_assoc($pdo, $sql, $params);
+}
+
+function build_protocol_aggregate_summary(PDO $pdo, $protocol, $tableName, $cameraId, $timestamps, $startEventTime, $endEventTime)
+{
+    list($whereSql, $params) = build_where($cameraId, $timestamps, $startEventTime, $endEventTime);
+
+    $commonSql = "SELECT
+        COUNT(*) AS total_records,
+        COUNT(DISTINCT batch_id) AS batch_count,
+        COUNT(DISTINCT camera_id) AS camera_count,
+        COUNT(DISTINCT DATE(FROM_UNIXTIME(event_timestamp_ms / 1000))) AS active_days,
+        COALESCE(DATE_FORMAT(MAX(FROM_UNIXTIME(event_timestamp_ms / 1000)), '%Y-%m-%d'), '') AS latest_active_date,
+        COALESCE(DATE_FORMAT(MAX(FROM_UNIXTIME(event_timestamp_ms / 1000)), '%Y-%m-%d'), '') AS latest_event_day,
+        COALESCE(DATE_FORMAT(MAX(created_at), '%Y-%m-%d'), '') AS latest_receive_day
+        FROM $tableName" . $whereSql;
+
+    $common = query_single_row_assoc($pdo, $commonSql, $params);
+    if (!$common || intval($common['total_records']) <= 0) {
+        return array(
+            'protocol_id' => intval($protocol),
+            'total_records' => 0,
+            'batch_count' => 0,
+            'camera_count' => 0,
+            'active_days' => 0,
+            'latest_active_date' => '',
+            'latest_event_time' => 0,
+            'latest_event_camera' => '',
+            'earliest_event_time' => 0,
+            'earliest_event_camera' => '',
+            'latest_received_time' => '',
+            'latest_received_camera' => '',
+            'latest_event_day' => '',
+            'latest_receive_day' => '',
+            'event_hourly_date' => '',
+            'receive_hourly_date' => ''
+        );
+    }
+
+    $summary = array(
+        'protocol_id' => intval($protocol),
+        'total_records' => intval($common['total_records']),
+        'batch_count' => intval($common['batch_count']),
+        'camera_count' => intval($common['camera_count']),
+        'active_days' => intval($common['active_days']),
+        'latest_active_date' => strval($common['latest_active_date']),
+        'latest_event_day' => strval($common['latest_event_day']),
+        'latest_receive_day' => strval($common['latest_receive_day']),
+        'event_hourly_date' => '',
+        'receive_hourly_date' => ''
+    );
+
+    $latestEvent = query_protocol_edge_row($pdo, $tableName, $whereSql, $params, 'event_timestamp_ms', 'DESC');
+    $earliestEvent = query_protocol_edge_row($pdo, $tableName, $whereSql, $params, 'event_timestamp_ms', 'ASC');
+    $latestReceive = query_protocol_edge_row($pdo, $tableName, $whereSql, $params, 'created_at', 'DESC');
+
+    $summary['latest_event_time'] = $latestEvent ? intval($latestEvent['field_value']) : 0;
+    $summary['latest_event_camera'] = $latestEvent ? strval($latestEvent['camera_id']) : '';
+    $summary['earliest_event_time'] = $earliestEvent ? intval($earliestEvent['field_value']) : 0;
+    $summary['earliest_event_camera'] = $earliestEvent ? strval($earliestEvent['camera_id']) : '';
+    $summary['latest_received_time'] = $latestReceive ? strval($latestReceive['field_value']) : '';
+    $summary['latest_received_camera'] = $latestReceive ? strval($latestReceive['camera_id']) : '';
+
+    if (intval($protocol) === 101) {
+        $sql101 = "SELECT
+            COUNT(DISTINCT CONCAT(COALESCE(camera_id, ''), '::', CAST(event_timestamp_ms AS CHAR), '::',
+                COALESCE(JSON_UNQUOTE(JSON_EXTRACT(normalized_json, '$.frame_seq')),
+                         JSON_UNQUOTE(JSON_EXTRACT(normalized_json, '$.frame_index')),
+                         '')
+            )) AS keyframe_count,
+            SUM(CASE
+                WHEN NOT (IFNULL(x1, 0) = 0 AND IFNULL(y1, 0) = 0 AND IFNULL(x2, 0) = 0 AND IFNULL(y2, 0) = 0) THEN 1
+                ELSE GREATEST(COALESCE(CAST(JSON_UNQUOTE(JSON_EXTRACT(normalized_json, '$.frame_target_count')) AS SIGNED), 0), 0)
+            END) AS target_total,
+            COUNT(DISTINCT CASE WHEN IFNULL(track_id, 0) > 0 THEN track_id ELSE NULL END) AS track_count,
+            SUM(CASE WHEN IFNULL(obj_type, 0) = 0 THEN 1 ELSE 0 END) AS person_total
+            FROM $tableName" . $whereSql;
+        $row101 = query_single_row_assoc($pdo, $sql101, $params);
+        $summary['keyframe_count'] = intval(isset($row101['keyframe_count']) ? $row101['keyframe_count'] : 0);
+        $summary['target_total'] = intval(isset($row101['target_total']) ? $row101['target_total'] : 0);
+        $summary['track_count'] = intval(isset($row101['track_count']) ? $row101['track_count'] : 0);
+        $summary['person_total'] = intval(isset($row101['person_total']) ? $row101['person_total'] : 0);
+        $summary['non_person_total'] = max(0, $summary['total_records'] - $summary['person_total']);
+        return $summary;
+    }
+
+    if (intval($protocol) === 102) {
+        $sql102 = "SELECT
+            SUM(COALESCE(embedding_byte_length, 0)) AS vector_bytes,
+            SUM(CASE WHEN COALESCE(person_name, '') <> '' THEN 1 ELSE 0 END) AS recognized_total
+            FROM $tableName" . $whereSql;
+        $row102 = query_single_row_assoc($pdo, $sql102, $params);
+        $summary['vector_bytes'] = intval(isset($row102['vector_bytes']) ? $row102['vector_bytes'] : 0);
+        $summary['recognized_total'] = intval(isset($row102['recognized_total']) ? $row102['recognized_total'] : 0);
+        $summary['unrecognized_total'] = max(0, $summary['total_records'] - $summary['recognized_total']);
+        return $summary;
+    }
+
+    $sql103 = "SELECT
+        SUM(COALESCE(image_byte_length, 0)) AS image_bytes,
+        SUM(CASE WHEN COALESCE(image_fetch_status, '') = 'success' THEN 1 ELSE 0 END) AS success_total,
+        SUM(CASE WHEN COALESCE(image_fetch_status, '') = 'incomplete' THEN 1 ELSE 0 END) AS incomplete_total
+        FROM $tableName" . $whereSql;
+    $row103 = query_single_row_assoc($pdo, $sql103, $params);
+    $summary['image_bytes'] = intval(isset($row103['image_bytes']) ? $row103['image_bytes'] : 0);
+    $summary['success_total'] = intval(isset($row103['success_total']) ? $row103['success_total'] : 0);
+    $summary['incomplete_total'] = intval(isset($row103['incomplete_total']) ? $row103['incomplete_total'] : 0);
+    $summary['other_abnormal_total'] = max(0, $summary['total_records'] - $summary['success_total'] - $summary['incomplete_total']);
+    return $summary;
+}
+
+function handle_query_aggregate(PDO $pdo)
+{
+    if (strtoupper(isset($_SERVER['REQUEST_METHOD']) ? $_SERVER['REQUEST_METHOD'] : '') !== 'GET') {
+        respond_error('Only GET method is supported', 405);
+    }
+
+    $protocol = normalize_int_or_null(isset($_GET['protocol']) ? $_GET['protocol'] : null);
+    if ($protocol === null || !in_array($protocol, array(101, 102, 103), true)) {
+        respond_error('protocol must be 101, 102 or 103', 400);
+    }
+
+    if (!ensure_query_message_table_exists($pdo, $protocol)) {
+        respond_success(array(
+            'summary' => array(
+                'protocol_id' => intval($protocol),
+                'total_records' => 0,
+                'batch_count' => 0,
+                'camera_count' => 0,
+                'active_days' => 0,
+                'latest_active_date' => '',
+                'latest_event_time' => 0,
+                'latest_event_camera' => '',
+                'earliest_event_time' => 0,
+                'earliest_event_camera' => '',
+                'latest_received_time' => '',
+                'latest_received_camera' => '',
+                'latest_event_day' => '',
+                'latest_receive_day' => '',
+                'event_hourly_date' => '',
+                'receive_hourly_date' => ''
+            ),
+            'quality_summary' => array('error_count' => 0, 'missing_count' => 0, 'missing_frames' => 0),
+            'event_timeline' => array(),
+            'receive_timeline' => array(),
+            'camera_distribution' => array()
+        ), 'ok');
+    }
+
+    $cameraId = normalize_string_or_null(isset($_GET['camera_id']) ? $_GET['camera_id'] : (isset($_GET['cam_id']) ? $_GET['cam_id'] : null));
+    $timestamps = parse_timestamp_list(isset($_GET['timestamps']) ? $_GET['timestamps'] : null);
+    $startEventTime = normalize_timestamp_or_null(isset($_GET['start_event_time']) ? $_GET['start_event_time'] : null);
+    $endEventTime = normalize_timestamp_or_null(isset($_GET['end_event_time']) ? $_GET['end_event_time'] : null);
+    $eventGranularity = normalize_aggregate_granularity(isset($_GET['event_granularity']) ? $_GET['event_granularity'] : 'day');
+    $receiveGranularity = normalize_aggregate_granularity(isset($_GET['receive_granularity']) ? $_GET['receive_granularity'] : 'day');
+    $eventHourlyDate = normalize_date_text_or_null(isset($_GET['event_hourly_date']) ? $_GET['event_hourly_date'] : null);
+    $receiveHourlyDate = normalize_date_text_or_null(isset($_GET['receive_hourly_date']) ? $_GET['receive_hourly_date'] : null);
+
+    $tableName = 'message_' . intval($protocol) . '_records';
+    $summary = build_protocol_aggregate_summary($pdo, $protocol, $tableName, $cameraId, $timestamps, $startEventTime, $endEventTime);
+    $eventTimeline = query_protocol_timeline($pdo, $tableName, $cameraId, $timestamps, $startEventTime, $endEventTime, 'event', $eventGranularity, $eventHourlyDate);
+    $receiveTimeline = query_protocol_timeline($pdo, $tableName, $cameraId, $timestamps, $startEventTime, $endEventTime, 'receive', $receiveGranularity, $receiveHourlyDate);
+    $summary['event_hourly_date'] = strval($eventTimeline['effective_date']);
+    $summary['receive_hourly_date'] = strval($receiveTimeline['effective_date']);
+
+    $qualitySummary = $summary['total_records'] > 0
+        ? query_quality_summary_from_table($pdo, $protocol, $cameraId, $startEventTime, $endEventTime)
+        : array('error_count' => 0, 'missing_count' => 0, 'missing_frames' => 0);
+
+    respond_success(array(
+        'summary' => $summary,
+        'quality_summary' => $qualitySummary,
+        'event_timeline' => $eventTimeline['rows'],
+        'receive_timeline' => $receiveTimeline['rows'],
+        'camera_distribution' => query_protocol_camera_distribution($pdo, $tableName, $cameraId, $timestamps, $startEventTime, $endEventTime, 12)
+    ), 'ok');
+}
+
 function handle_query_records(PDO $pdo)
 {
     if (strtoupper(isset($_SERVER['REQUEST_METHOD']) ? $_SERVER['REQUEST_METHOD'] : '') !== 'GET') {
@@ -951,35 +1370,34 @@ function handle_query_records(PDO $pdo)
     $qualityMissingCount = 0;
     $qualityMissingFrames = 0;
 
-    if ($qualityStatus === 'all') {
-        $sql = 'SELECT * FROM (' . implode(' UNION ALL ', $selects) . ') t ORDER BY created_at DESC, id DESC LIMIT ' . intval($limit) . ' OFFSET ' . intval($offset);
-        $stmt = $pdo->prepare($sql);
-        $stmt->execute($params);
-        while (($row = $stmt->fetch(PDO::FETCH_ASSOC)) !== false) {
-            $records[] = normalize_record($row, $includePayload);
-        }
-    } else {
-        $sqlAll = 'SELECT * FROM (' . implode(' UNION ALL ', $selects) . ') t ORDER BY created_at DESC, id DESC';
-        $stmtAll = $pdo->prepare($sqlAll);
-        $stmtAll->execute($params);
-        $normalizedAll = array();
-        while (($row = $stmtAll->fetch(PDO::FETCH_ASSOC)) !== false) {
-            $normalizedAll[] = normalize_record($row, $includePayload);
-        }
+    $qualityWhere = '';
+    if ($qualityStatus === 'error') {
+        $qualityWhere = " WHERE quality_status IN ('error', 'error_missing')";
+    } elseif ($qualityStatus === 'missing') {
+        $qualityWhere = " WHERE quality_status IN ('missing', 'error_missing')";
+    } elseif ($qualityStatus === 'normal') {
+        $qualityWhere = " WHERE quality_status = 'normal'";
+    }
 
-        $stateMap = build_quality_state_map($normalizedAll, $qualityErrorCount, $qualityMissingCount, $qualityMissingFrames);
-        $filtered = array();
-        foreach ($normalizedAll as $record) {
-            $recordId = intval(isset($record['record_id']) ? $record['record_id'] : 0);
-            $state = isset($stateMap[$recordId]) ? $stateMap[$recordId] : 'normal';
-            $record['quality_status'] = $state;
-            if (quality_match($qualityStatus, $state)) {
-                $filtered[] = $record;
-            }
-        }
+    $baseSql = 'SELECT * FROM (' . implode(' UNION ALL ', $selects) . ') t';
+    if ($qualityWhere !== '') {
+        $countStmt = $pdo->prepare('SELECT COUNT(*) FROM (' . implode(' UNION ALL ', $selects) . ') t' . $qualityWhere);
+        $countStmt->execute($params);
+        $total = intval($countStmt->fetchColumn());
+    }
 
-        $total = count($filtered);
-        $records = array_slice($filtered, $offset, $limit);
+    $sql = $baseSql . $qualityWhere . ' ORDER BY created_at DESC, id DESC LIMIT ' . intval($limit) . ' OFFSET ' . intval($offset);
+    $stmt = $pdo->prepare($sql);
+    $stmt->execute($params);
+    while (($row = $stmt->fetch(PDO::FETCH_ASSOC)) !== false) {
+        $records[] = normalize_record($row, $includePayload);
+    }
+
+    if ($protocol !== null && empty($timestamps)) {
+        $qualitySummary = query_quality_summary_from_table($pdo, $protocol, $cameraId, $startEventTime, $endEventTime);
+        $qualityErrorCount = intval($qualitySummary['error_count']);
+        $qualityMissingCount = intval($qualitySummary['missing_count']);
+        $qualityMissingFrames = intval($qualitySummary['missing_frames']);
     }
 
     respond_success(array(
