@@ -1,0 +1,18 @@
+[Unit]
+Description=Charging AIOT protocol quality worker
+After=network-online.target mariadb.service mysql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=www-data
+Group=www-data
+WorkingDirectory=/var/www/charging-platform/charging-aiot-php
+ExecStart=/usr/bin/php /var/www/charging-platform/charging-aiot-php/scripts/protocol_quality_worker.php --daemon --sleep=3 --limit=20
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
